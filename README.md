@@ -1,192 +1,81 @@
-# Dispatch Repo-3
+# Dispatch Library
 
-## Purpose
+Library department implementation for the Dispatch program (Level 1 Transport / Mike Zachary).
+This repo builds the **Library** link of the Intelligence → Library → Publisher dependency chain
+defined in `04_DISPATCH_SYSTEM_RELATIONSHIP_MATRIX.md`.
 
-This repository is the clean source-of-truth package for creating **DISPATCH_FINAL_BLUEPRINT_v1.md**.
+> Legacy note: this repo was previously used as "Repo-3", a document-only package for assembling
+> `DISPATCH_FINAL_BLUEPRINT_v1.md`. That mission is separate from this repo's current role.
+> Per `07_DISPATCH_REPO_PLACEMENT_PLAN.md` ("Library Repo"), this repository's job is to build and
+> test the Library department to integration-ready status. The governance documents mirrored at
+> the repo root remain as load-bearing reference material; `src/` is new.
 
-Repo-3 exists to move Dispatch from architecture review into final blueprint assembly.
+## Status
 
-This repository is not an archive, not a sandbox, not a debate space, and not a history collection. It contains the current Dispatch governance, architecture, hardening doctrines, specifications, and build-readiness source documents needed to create the final end-to-end Dispatch blueprint.
+**Integration-ready candidate.** Not merged into Dispatch. Not deployed. Not production-promoted.
+See `MERGE_READINESS_REPORT.md` and `KNOWN_GAPS.md`. Mike decides on promotion.
 
-## Current Mission
+## What this repo does
 
-The current mission is to produce:
+`src/dispatch_library/` implements Library as current reusable truth and controlled production
+asset storage (Constitution Section 7.4), never as temporary workspace or automatic truth from
+Archive or Intelligence:
 
-**DISPATCH_FINAL_BLUEPRINT_v1.md**
+- **`taxonomy.py`** — the 15 Library collections (Constitution/Process/Operations/Compliance/
+  Training/Reference/Templates/Company/Customer/Broker/Location_Intelligence/Route_Intelligence/
+  Publisher_Parts/Security/Index), a closed set.
+- **`models.py`** — `LibraryObject` (current truth), `LibraryCandidate` (pending nomination,
+  field-compatible with the Intelligence repo's object of the same name), `PublisherRecipe`.
+- **`registry.py`** — versioned Object Registry. Adding a new `CURRENT` version of an
+  `object_code` automatically supersedes the previous one; at most one `CURRENT` version can
+  exist per object_code at any time, by construction.
+- **`resolver.py`** — `current(object_code)`, the read path every other department uses. Never
+  returns a superseded or pending-review object.
+- **`ingestion.py`** — the two acceptance paths into Library truth (see below).
+- **`recipes.py`** — Publisher Recipe Registry + `resolve_packet()`, which resolves a recipe's
+  required Library object codes against the registry and reports `MISSING` rather than
+  fabricating a substitute.
+- **`service.py`** — `LibraryService`, the single integration point bundling the above.
 
-The final blueprint must describe Dispatch end to end, from doctrine to architecture to implementation planning to deployment path.
+## Two acceptance paths (no artificial validation loop)
 
-The blueprint should cover:
+1. **Human-placed documents** (`ingest_human_document`) become `CURRENT` truth immediately.
+   The placing human's identity (`accepted_by`) *is* the approval — there is no second review
+   gate, per the Hard Rule "Human-placed Library documents are accepted per Library doctrine"
+   and the Forbidden Movement "Human-Placed Library Asset -> Artificial Validation Loop".
+2. **Machine-nominated candidates** (from Intelligence or Publisher, via `submit_candidate`)
+   start `PENDING_REVIEW` and can only become truth through `review_candidate(..., approve=True,
+   reviewed_by=<human>)`. `reviewed_by` can never be a system identity and can never equal the
+   submitting department's own identity — enforced in code, not just by convention (Forbidden
+   Movement: "Intelligence Finding -> Library Truth Automatically").
 
-- authority model
-- Portal
-- Manager
-- Publisher
-- Intelligence Analyst
-- Library
-- Archive
-- Dispatch Spine
-- version doctrine
-- intelligence verification
-- alert governance
-- security and authentication
-- driver Portal
-- broker / customer Portal
-- telematics input model
-- MVP scope
-- build sequence
-- target repository structure
-- data model roadmap
-- testing plan
-- deployment promotion path
+## Service surfaces
 
-## Governing Authority
+```python
+from dispatch_library.service import LibraryService
+from dispatch_library.models import RecipeType
 
-Mike Zachary remains final authority.
+library = LibraryService()
+library.ingest_human_document("COI-TEMPLATE", "Templates", "COI Template", "...", "Mike Zachary")
+obj = library.current("COI-TEMPLATE")
+packet = library.resolve_packet(RecipeType.BROKER_ONBOARDING_PACKET)  # {code: obj | "MISSING"}
+library.submit_candidate(candidate)                                   # PENDING_REVIEW
+library.review_candidate(candidate.candidate_id, approve=True, reviewed_by="Mike Zachary")
+```
 
-No document in this repository authorizes:
+## Install / Test
 
-- deployment
-- production code
-- code merge
-- autonomous load booking
-- autonomous government submission
-- autonomous contract commitment
-- autonomous final approval
-- AI approval of facts, truth, packets, rates, compliance, or final documents
-- self-modifying prompts
-- self-modifying code
-- authority transfer away from Mike
+```bash
+export PYTHONPATH=$(pwd)/src
+pip install pytest
+pytest -v
+```
 
-All recommendations are advisory only.
+See `docs/OBJECT_MODEL.md` for the full schema reference.
 
-Mike decides.
+## Boundaries (Constitution Section 7.4; Repo Placement Plan)
 
-## Core Dispatch Model
-
-Dispatch is a governed digital office for Level 1 Transport.
-
-Dispatch exists to reduce owner/operator cognitive and administrative load while producing human-useful operational deliverables through the Portal.
-
-Dispatch is built around:
-
-- Mike Zachary as final authority
-- Portal as the required Presentation Layer
-- Manager as the Run Office function
-- Publisher as the document and packet production function
-- Intelligence Analyst as the cognitive interpretation and verification function
-- Library as approved reusable truth and production asset storage
-- Archive as completed history and retention storage
-- Dispatch Spine as deterministic runtime machinery
-- bounded cognitive functions for Manager reasoning, Publisher drafting, and Intelligence analysis
-
-## Active Source Documents
-
-The active Repo-3 source package should include:
-
-- DISPATCH_CONSTITUTION_v3.md
-- CONTEXT_MASTER.md
-- ARCHITECTURE.md
-- MANAGER.md
-- PUBLISHER.md
-- INTELLIGENCE_ANALYST.md
-- COGNITIVE_FUNCTIONS.md
-- PORTAL_DESCRIPTION.md
-- DISPATCH_SPINE_OVERVIEW.md
-- DISPATCH_SPINE_SPECIFICATION_v1.md
-- DISPATCH_VERSION_DOCTRINE.md
-- ARCHIVE_REVIEW_POLICY.md
-- INTELLIGENCE_VERIFICATION_WORKFLOW.md
-- ALERT_GOVERNANCE_DOCTRINE.md
-- SECURITY_AND_AUTHENTICATION_SPECIFICATION_v1.md
-- ARCHITECTURAL_DISPOSITION.md
-- SUPERSESSION_MAP.md
-- REFINEMENT_ANALYST_REMOVAL.md
-- DISPATCH_DECISION_MATRIX.md
-- DISPATCH_REPO_MANIFEST_v3.md
-- README.md
-
-## Retired or Excluded Material
-
-Do not include old architecture drafts or retired documents in this repository unless Mike explicitly requests historical comparison.
-
-Repo-3 should not include:
-
-- DISPATCH_CONSTITUTION_v2.md
-- DISPATCH_CLEAN_REPO_ROUND_2_MANIFEST.md
-- old Context Master versions
-- old 11-agent mesh files
-- old stress-test reports
-- old consensus matrix outputs
-- old prototype scaffold code
-- reviewer branch artifacts
-- archived experiments
-- retired governance stack drafts
-
-Retired material belongs in Archive or prior review repositories, not Repo-3.
-
-## Document-Control Rule
-
-Repo-3 is intended to be stable while the final blueprint is generated.
-
-Do not keep changing source documents while an AI system is generating the final blueprint, or the blueprint will be based on a moving target.
-
-If a source file must change, record the change clearly and rerun the blueprint generation from the updated package.
-
-## Blueprint Generation Instruction
-
-When using this repository, the correct assignment is:
-
-Create **DISPATCH_FINAL_BLUEPRINT_v1.md** using only the current active Repo-3 source documents.
-
-Do not critique missing history.
-
-Do not reintroduce retired concepts.
-
-Do not create new agents unless the current architecture cannot absorb the required function.
-
-Do not use the Dispatcher Agent name.
-
-Do not return to the 11-agent mesh.
-
-Do not propose autonomous authority.
-
-## Build Philosophy
-
-Dispatch should be built as a practical, governed, human-authority system.
-
-The preferred build posture is:
-
-- deterministic first
-- Portal visible
-- human approved
-- version aware
-- source grounded
-- security controlled
-- audit recorded
-- small enough to build
-- strong enough to grow
-
-## Current Stage
-
-Repo-3 is for:
-
-**Final Blueprint Assembly**
-
-Not production deployment.
-
-Not autonomous execution.
-
-Not code merge.
-
-Not doctrine alteration without Mike approval.
-
-## Authority Closing
-
-This repository exists to create the final Dispatch blueprint.
-
-No action is authorized by repository contents alone.
-
-Mike Zachary remains final authority.
-
-Mike decides.
+Library does not create truth from Archive automatically, does not force review loops on
+human-placed documents, and does not treat machine-generated findings as truth without an
+approved path. This repo contains no Publisher drafting logic, no Intelligence analysis logic,
+and no Archive-history-as-current-truth logic.
