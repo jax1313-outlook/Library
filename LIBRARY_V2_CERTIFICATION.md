@@ -86,7 +86,7 @@ mapping), `dispatch_launcher/settings.py`, `tests/conftest.py`, `tests/test_stor
 | — CLI | the full candidate and placement path, one process per step |
 | Joe-Assistant Workers + Testing | **147 passed, 55 subtests passed, 0 skipped** |
 | Dispatch, affected suites | **590 passed, 5 failed** — all 5 in `test_sandbox_survey.py`, failing identically on the unmodified branch (WinError 1314: symlink privilege; long path) |
-| Dispatch, full suite | Running at the time of writing; see §9 |
+| Dispatch, full suite | **4,197 passed, 38 failed** on `9669364` (41 min, clean environment). The 38 are in `test_launcher.py`, `test_rehearsal_and_proof.py`, `test_repository_doctrine.py`, `test_auth_lockout_concurrency.py`, `test_store_concurrency.py` and `test_sandbox_survey.py`. The same six files on the unmodified branch `4d247ac`: **37 failed**. The two tests that failed here but not in one baseline run were each repeated four times on both trees and failed in 2 of 4 runs on **both** — flaky on the original code. No failure is attributable to this build |
 
 **Correction to plan v2 §7.2.** It said the nine-identity list "appears in six CHECKs". Six CHECKs
 refuse system identities; four carry exactly the nine, the object-type confirmer carries the nine
@@ -238,5 +238,6 @@ configured.
   this mission.**
 - **Contracts document:** `DISPATCH_SHARED_OBJECT_CONTRACTS_v1.md` (Claude-3 repository) still
   describes the pre-v2 candidate; the additive fields are recorded here and in `models.py`.
-- **Full Dispatch suite:** started on `9669364` in the clean environment; if it has not finished
-  when this is read, its result is outstanding. The affected suites are recorded in §4.
+- **Dispatch's own pre-existing failures:** launcher, subprocess, symlink and multi-process tests
+  fail on this machine on the unmodified branch too (§4). They are Dispatch's to fix and were not
+  touched here.
