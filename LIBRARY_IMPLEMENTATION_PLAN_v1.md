@@ -114,6 +114,15 @@ Two consequences worth stating plainly:
 
 ## 3. Recommended SQLite schema
 
+> **Update 2026-09-13, local session — this schema is superseded and must not be built.**
+> The Library Department Core Object Model (`D:\Library`) was read. It specifies fields and
+> tables this schema does not carry, so under this plan's own rule (§11) the Core Object Model
+> wins and this section is wrong. The gap is not a few columns: it is an immutable object id,
+> `MAJOR.MINOR` versions, a nine-state lifecycle, separate version, approval, archive-link,
+> metadata, relationship and retrieval-event tables, and a collections table this section
+> explicitly rejects. It also names 14 collections, not 15. Field-by-field in §15. The SQL is
+> kept below as the record of what was proposed.
+
 Verified on SQLite 3.45.1 before being written here: the script below executes
 as given (10 tables), and eight refusals were exercised directly against it —
 a second CURRENT version of one `object_code`; two objects claiming one shelf
@@ -275,7 +284,47 @@ sixteenth collection, which is the opposite of what a closed set means.
 
 ---
 
-## 4. Mapping `D:\Memory` folders to Library collections — **OPEN**
+## 4. Mapping `D:\Memory` folders to Library collections — **MAPPED, approved by Mike Zachary 2026-09-13**
+
+> **Update 2026-09-13, local session.** Written from the real listing of `D:\Memory`:
+> eighteen top-level folders, seventeen of them empty. Only `Company Library` holds files —
+> sixteen, in the root and in `Agent Worker Constitutions\`. The table lives in
+> `src/dispatch_library/shelf_mapping.py` and is re-checked against the drive by
+> `python -m dispatch_library.shelf_mapping D:\Memory`. Mike Zachary approved the two-tier model
+> and every row below in the owner ruling of 2026-09-13 (§16, rulings 4 and 5).
+>
+> | `D:\Memory` folder | Collection | Basis |
+> |---|---|---|
+> | Company Library | Company | name |
+> | Broker Library | Broker | name |
+> | Customer Library | Customer | name |
+> | Location Intelligence | Location_Intelligence | name |
+> | Templates | Templates | name |
+> | Compliance | Compliance | name |
+> | Procedures | Process | COM §4 SOP / Workflow — approved |
+> | Manuals | Training | COM §4 Training Asset / Manual — approved |
+> | Forms | Templates | COM §4 Form / Template — approved |
+> | Insurance | Company | COM §4 Company Credential — approved |
+> | Equipment | Company | COM §2, §4 Capability Asset — approved |
+> | Certifications | Compliance | COM §4 Compliance Asset — approved |
+> | Operational Intelligence | — unmapped | pending ownership review |
+> | Receipts | — unmapped | pending ownership review |
+> | Fuel | — unmapped | pending ownership review |
+> | Drivers | — unmapped | pending ownership review |
+> | Evidence | — unmapped | pending ownership review; COM §1.1 gives evidence to Archive |
+> | Documents | — unmapped | pending ownership review |
+>
+> **Collections with no folder:** Constitution, Operations, Reference, Route_Intelligence,
+> Publisher_Parts, Security, Index.
+>
+> **Placement conflicts:** all sixteen files in `Company Library` — see §16.3. Recommendations
+> only; nothing is moved.
+>
+> **Rule 5 is not done.** Cataloguing this table as an `Index` object needs the persistent
+> catalog, which waits on review of the corrected schema (`LIBRARY_IMPLEMENTATION_PLAN_v2.md`).
+> Index, not Reference, per ruling 2.
+>
+> The original text of this section follows unchanged.
 
 **This section cannot be written from this container.** See §11.
 
@@ -437,8 +486,12 @@ sit late rather than in the middle.
 | **S5** | Candidate queue to SQLite. Durable `pending_candidates()`. | S1 | No |
 | **S6** | Archive Review Queue — current+3, PENDING dispositions, the monthly report's data. Nothing auto-deletes. | S2 | No |
 | **S7** | Register `catalog.db` in `Dispatch/dispatch/backup.py` `_SOURCES`; restore-path test. | S1 | No |
-| **S8** | Publisher: `resolve_packet` against real recipes. | S1, **`publisher_recipes.json`** | **Yes** |
-| **S9** | The `D:\Memory` → collection mapping table, ingested as an `Index` object accepted by Mike. | S4, **the folder listing** | **Yes** |
+| **S8** | Publisher: `resolve_packet` against real recipes. | S1, **`publisher_recipes.json`** | **Loaded 2026-09-13** — 2 of 5 recipe types; see §15.3 |
+| **S9** | The `D:\Memory` → collection mapping table, ingested as an `Index` object accepted by Mike. | S4, **the folder listing** | **Mapped 2026-09-13** — ingestion awaits Mike; see §4 |
+
+> **Update 2026-09-13:** S1–S7 are **on hold** until a schema is redrawn from the Core Object
+> Model (§15). S8 and S9 were done without the schema: both are in-memory/lookup work that does
+> not depend on S1 or S4 as built.
 | **S10** | Intelligence route: `route_to_library()` → durable candidate queue. | S5 | No |
 
 S1–S7 and S10 are eight of ten steps and none of them are blocked. **The
@@ -540,3 +593,170 @@ Five of ten already hold. Three of the remaining five are unblocked today.
   derived from `models.py`, not from the authoritative specification.
 - **No estimate of the migration's size is given**, because that depends on the
   folder listing.
+
+> **Update 2026-09-13, local session.** `D:\Library` and `D:\Memory` have now been inspected, and
+> the comparison against the Core Object Model has been made (§15). It found §3 wrong. The
+> migration is small today: sixteen files, all in one folder. Still not claimed: that any object
+> has been catalogued, that anything persists, or that Mike has accepted any mapping row.
+
+---
+
+## 15. Core Object Model reconciliation — 2026-09-13, local session
+
+Sources read on Mike's machine: `D:\Library\Library Department Core Object Model.docx` (COM),
+`Publisher_Product_001_L1-COS_Constitution_Package_v1.0.docx`, `publisher notes.docx`,
+`publisher_recipes.json`, and a recursive listing of `D:\Memory`.
+
+**As written, nothing in this section was decided.** Mike Zachary ruled on every conflict below
+on 2026-09-13; the rulings are recorded in §16 and the text here is left as the record of what
+was found.
+
+### 15.1 COM §3 base schema against the §3 SQL
+
+| COM field group | COM fields | §3 schema |
+|---|---|---|
+| Identity | `library_object_id` (immutable, `libobj_{ULID}`) | **Missing.** Key is `(object_code, version)` |
+| | `object_code` as `LIB-{COLLECTION}-{TYPE}-{SHORTNAME}-v{MAJOR.MINOR}` | Present; no format |
+| | `object_type`, `slug`, `canonical_name` | **Missing** |
+| | `collection`, `title` | Present |
+| Status / version | `version` as `MAJOR.MINOR` with defined bump rules | **Integer** |
+| | lifecycle: Draft/Candidate → Submitted → Validated → Approved Current → Active Use → Review Due → Superseded → Archived Version Record → Retention Review | **3 states** |
+| | `is_current`, `effective_date`, `superseded_by_id`, `review_cycle`, `review_due_date` | **Missing** |
+| | `supersedes_id` | Partial: `supersedes_version` |
+| Authority | `approver`, `approved_at` | ≈ `accepted_by`, `accepted_at` |
+| | `owner_role`, `approval_status`, `approval_record_id`, `authority_basis` | **Missing** |
+| Source / provenance | `source_refs[]`, `created_from_workspace_id`, `created_from_archive_id`, `source_confidence`, `no_fabrication_check` | **Missing** (`source` is a different thing: how it arrived) |
+| Retrieval | `retrieval_tags[]` | ≈ `library_object_tag` |
+| | `consumer_roles[]`, `allowed_use`, `access_level`, `current_only_default` | **Missing** |
+| Validation | `validation_gate`, `validation_result`, `drift_check_result`, `conflict_notice_id`, `quality_check_result` | **Missing** |
+| Archive link | `archive_record_id`, `superseded_archive_id`, `approval_archive_id`, `retention_class` | **Missing** |
+| Relationships | `related_objects[]`, `depends_on[]`, `used_by[]`, `replaces[]`, `derived_from[]` | **Missing** |
+
+COM §9 tables against §3: `library_collections` (§3 rejects a collections table on purpose —
+**direct conflict**); `library_objects` + `library_versions` split (§3: one table; the COM's
+`content_uri` + `content_hash` cover §3's shelf binding); `library_metadata`, `approval_records`,
+`archive_links`, `retrieval_events`, `object_relationships` (**missing**); `library_candidates`
+(present, different fields — see 15.2). §3 carries things the COM does not: `catalog_scan`,
+`catalog_finding`, `archive_review_queue`, and the recipe tables.
+
+### 15.2 Conflicts beyond the schema, for Mike
+
+1. **14 or 15 collections.** COM §5 lists fourteen with no `Security`. `taxonomy.py` and
+   `04_DISPATCH_SYSTEM_RELATIONSHIP_MATRIX.md` §7 (line 615) list fifteen including `Security`.
+   The closed set is not changed here.
+2. **Where the Index lives.** COM §4 puts "Library Index / Manifest" in *Reference*; §4 rule 5
+   of this plan puts the mapping table in *Index*. COM §5 also lists an `Index` folder.
+3. **Who may submit a candidate.** COM §8 takes candidates from Intell, Manager, Publisher,
+   Dispatch or Human. `models.SubmittedBy` allows only `INTELLIGENCE` and `PUBLISHER`, and the
+   `LibraryCandidate` shape is field-locked to the Intelligence repo.
+4. **Manager and legacy naming.** The COM is titled L2-COS and assigns Library duties to Manager.
+   §12 of this plan and `CLAUDE.md` §5.6 say Dispatch has no Manager component and legacy names
+   are not propagated. "The COM wins" on fields does not settle whether it wins on these.
+5. **Human-placed assets and the validation gate.** §5 of this plan: a human-placed document is
+   CURRENT with no second gate. COM §7–8 routes candidates "from … Human" through validation.
+   These may be consistent (a human placement is not a candidate); it needs saying.
+6. **Two copies of the COM** on the drive (§4 findings).
+
+### 15.3 S8 — `publisher_recipes.json`
+
+Loaded by `recipes.load_recipe_registry(path)`, per the choice Mike Zachary made in the local session on 2026-09-13 and confirmed in ruling 6, to keep
+`PublisherRecipe` unchanged and drop no field:
+
+- `required_company_items` → `required_library_object_codes`; `required_publisher_items` →
+  `required_publisher_parts`; `required_human_items`, `required_outputs`,
+  `human_review_required` → `RecipeSourceDetail`, held beside the recipe.
+- The file defines **two** recipes, `broker_onboarding` and `government_proposal`.
+  `VISIBILITY_STATUS_PACKET`, `POD_PACKAGE` and `REVIEW_PACKAGE` remain scaffold, and
+  `RecipeRegistry.is_scaffold()` reports it.
+- The company items are **item keys** (`w9`, `authority`), not COM object codes
+  (`LIB-COMPANY-W9-…`). Against the empty Library every one resolves `MISSING`, which is correct.
+  Making them resolve needs the object-code rules in 15.1 settled first.
+- The file has no intelligence requirements; none were invented.
+- **Not wired.** `LibraryService` already accepts a recipe registry, but
+  `Joe-Assistant/Workers/worker_bus/host.py` still builds the scaffold default. Changing that is
+  a Joe-Assistant change and was not made.
+- `publisher notes.docx` is an FMCSA MCS-150 completion checklist, not recipe content. It was not
+  loaded.
+
+---
+
+## 16. Owner ruling — Mike Zachary, 2026-09-13
+
+Given by Mike Zachary in the local session, in his own words, after §15 was reported. Recorded
+here as he stated it; nothing below extends his approval beyond what he stated.
+
+**The Core Object Model governs the persistent Library catalog. §3 must not be built where it
+conflicts with it.** The corrected schema is in `LIBRARY_IMPLEMENTATION_PLAN_v2.md`.
+
+### 16.1 Rulings
+
+| # | Subject | Ruling |
+|---|---|---|
+| 1 | Collections | Keep the fifteen-collection taxonomy, **including Security**. Its absence from the older COM does not authorise removing it from the taxonomy or the Matrix. |
+| 2 | Index | Keep **Index** as its own collection. It holds catalog maps, manifests, shelf mappings and other Library control records — **not** Reference. |
+| 3 | Candidate sources | Mike/Human; Intelligence; Publisher; Dispatch **only when tied to a real Mission Record or workflow event**. Library may classify and validate candidates but may not approve its own nominations. No Manager component is created or restored. No system identity may manufacture human approval. |
+| 4 | `D:\Memory` mapping | Two-tier model approved, with the six name matches and six doctrine-supported rows of §4. Operational Intelligence, Receipts, Fuel, Drivers, Evidence and Documents stay **unmapped**, reported truthfully, pending ownership review. No folder is forced into a collection. |
+| 5 | Existing files | Worker constitutions and research papers in Company Library are **placement conflicts**. Not moved, renamed, deleted, rewritten or recatalogued. Recommendations may be stated: current worker constitutions → Constitution; approved reference or research → Reference; historical or superseded → Archive referral. Mike decides any relocation separately. |
+| 6 | Recipes | S8 accepted. Every source field preserved. The shared contract stays stable unless a documented compatibility extension is required. The three unsourced types stay clearly marked as placeholders. |
+| 7 | Naming | Current Dispatch terminology in new work. No L1-COS, L2-COS or Manager-component terms propagated. Historical documents not rewritten. Short plain names, never shortened past clarity. |
+
+### 16.2 Evidence recorded for S8 and S9
+
+- **Tests.** 49 passed when S8 and S9 were first reported. After the rulings were applied —
+  tier renamed `DOCTRINE_SUPPORTED`/`UNMAPPED`, the ruling's exact rows pinned, placement
+  conflicts added — **52 passed**, 0 skipped, on Python 3.14.5 / pytest 9.1.1, Windows 11. The
+  two tests that read the real drive and the one that reads the real
+  `D:\Library\publisher_recipes.json` ran; none was skipped.
+- **Scan.** `python -m dispatch_library.shelf_mapping D:\Memory`, read-only, 2026-09-13:
+  18 top-level folders; 16 files, all under `Company Library`; 6 name matches, 6
+  doctrine-supported, 6 unmapped; every folder on disk is in the table; every table row is on
+  disk; no loose files at the root; collections with no folder: Constitution, Operations,
+  Reference, Route_Intelligence, Publisher_Parts, Security, Index.
+- **No shelf file was changed.** A SHA-256, size and modification-time listing of every entry
+  under `D:\Memory` (19 directories, 16 files) was taken before the ruling work began and
+  compared after it; the two listings are identical. No code in this change writes under the
+  memory root.
+
+### 16.3 Placement conflicts — recommendations only
+
+All in `D:\Memory\Company Library`. Nothing was moved. Held in code as
+`shelf_mapping.PLACEMENT_CONFLICTS`.
+
+| File | Kind | Recommended |
+|---|---|---|
+| `Agent Worker Constitutions\00_DISPATCH_WORKER_CONSTITUTION_ARCHITECTURE.md` through `09_SUBCONTRACTOR_BUILD_RULES.md` (10 files) | worker constitution | Constitution if current; Archive referral if historical |
+| `Agent Worker Constitutions\README.md` | worker constitution | Constitution if current |
+| `Agent Worker Constitutions\DISPATCH_WORKER_CONSTITUTION_PACKAGE_v1.zip` | worker constitution | Constitution — **byte-identical copies** of the eleven files beside it (SHA-256 compared) |
+| `Operational Memory Systems in Organizations 1.docx` | research paper | Reference; the ` 1` suffix suggests a copy |
+| `Freight Visibility for Regional Carriers 2.docx` | research paper | Reference; the ` 2` suffix suggests a copy |
+| `Freight System Design Package – Cargo Van + Trailer Operation.docx` | research / design paper | Reference |
+| `Library Department Core Object Model 1.docx` | design authority | Reference — same text as the `D:\Library` copy; which copy is canonical is Mike's call |
+
+### 16.4 Still unresolved
+
+- The six unmapped folders — ownership review.
+- Which Core Object Model copy is canonical.
+- Whether each worker constitution is current (Constitution) or historical (Archive referral).
+- Cataloguing the mapping as an `Index` object — waits on the persistent catalog.
+- Wiring the loaded recipes into `Joe-Assistant/Workers/worker_bus/host.py` — a Joe-Assistant change, not made.
+
+### 16.5 S1–S5 were built against the superseded schema — not accepted
+
+Four commits reached this branch on 2026-09-13 between 18:31 and 18:38 UTC, from another session,
+before the owner ruling reached it: `c767856` S1, `a3cceb8` S2+S3, `5168a3f` S5, `aee174b` S4.
+They add `src/dispatch_library/catalog/` (schema, `SqliteObjectRegistry`, `SqliteCandidateQueue`,
+shelf scan, `CatalogLibraryService`) and four test files, 169 tests.
+
+`catalog/schema.sql` **is the §3 schema of this plan**, table for table — the one §3 and the
+owner ruling say must not be built where it conflicts with the Core Object Model. It has no
+immutable object id, integer versions, three lifecycle states, and no approval-record,
+archive-link, metadata, relationship, retrieval-event or collections table.
+
+Mike Zachary's instruction on 2026-09-13: push S8/S9 on top and flag S1–S5; do not revert. So:
+
+- **S1–S5 stay on the branch and are not accepted.** Nothing uses them: no `catalog.db` exists on
+  `D:`, and no code in Joe-Assistant or Dispatch imports `dispatch_library.catalog`.
+- Much of the mechanism is reusable (single-transaction supersession, WAL/busy-timeout
+  connection handling, version refusal, read-only shelf scan, shared-connection approval). The
+  trace is in `LIBRARY_IMPLEMENTATION_PLAN_v2.md` §4.
+- Reverting, keeping, or rebuilding them is Mike's decision at the v2 review.
