@@ -411,13 +411,20 @@ class Catalog:
                 (row["version_id"], now),
             )
 
-    def set_lifecycle(self, object_code: str, state: str) -> sqlite3.Row:
-        """Move the current version among CURRENT, ACTIVE_USE and REVIEW_DUE."""
+    def set_lifecycle(self, object_code: str, state: str, *, by: Optional[str] = None) -> sqlite3.Row:
+        """Move the current version among CURRENT, ACTIVE_USE and REVIEW_DUE.
+
+        Marking REVIEW_DUE is Library's detection and needs no name; it raises an EXPIRED notice.
+        Leaving REVIEW_DUE is a renewal -- a person saying the asset may be used again -- so it
+        needs that person's name, and their renewal closes the EXPIRED notice in their name.
+        """
         if state not in {s.value for s in CURRENT_STATES}:
             raise CatalogRefusal(f"{state!r} is not a current lifecycle state; supersede or archive instead")
         current = self.current_row(object_code)
         if current is None:
             raise NotFound(object_code)
+        renewing = current["lifecycle_state"] == LifecycleState.REVIEW_DUE.value and state != LifecycleState.REVIEW_DUE.value
+        person = self.require_human(by, "a renewal") if renewing else None
         with self.write() as db:
             db.execute("UPDATE library_version SET lifecycle_state = ? WHERE version_id = ?",
                        (state, current["current_version_id"]))
@@ -426,6 +433,12 @@ class Catalog:
                     "EXPIRED", version_id=current["current_version_id"],
                     recommended_action="Renew or replace before any external use.",
                     detail=f"{object_code} is due for review and is blocked from external use.",
+                )
+            if renewing:
+                db.execute(
+                    "UPDATE library_notice SET status = 'RESOLVED', resolved_by = ?, resolved_at = ?, resolution = ? "
+                    "WHERE version_id = ? AND notice_type = 'EXPIRED' AND status = 'OPEN'",
+                    (person, _now(), f"renewed by {person}; returned to {state}", current["current_version_id"]),
                 )
         return self.current_row(object_code)
 

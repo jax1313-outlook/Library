@@ -147,6 +147,18 @@ class TestExternalUse:
         outcomes = [r["outcome"] for r in lib.catalog.retrieval_events("w9")]
         assert "BLOCKED_REVIEW_DUE" in outcomes
 
+    def test_renewal_is_a_persons_act_and_closes_the_expired_notice(self, lib):
+        lib.ingest_human_document("coi", "Company", "COI", "certificate", PERSON, object_type="COMPANY_CREDENTIAL")
+        lib.set_lifecycle("coi", "REVIEW_DUE")
+        with pytest.raises(CatalogRefusal, match="a renewal must name a real person"):
+            lib.set_lifecycle("coi", "CURRENT")
+        with pytest.raises(CatalogRefusal):
+            lib.set_lifecycle("coi", "CURRENT", by="JOE")
+        lib.set_lifecycle("coi", "CURRENT", by="Mike Zachary")
+        notice = lib.catalog.notices(status=None, notice_type="EXPIRED")[0]
+        assert (notice["status"], notice["resolved_by"]) == ("RESOLVED", "Mike Zachary")
+        assert lib.current_for_external_use("coi") is not None
+
     def test_review_due_date_sweep(self, lib):
         lib.ingest_human_document("coi", "Company", "COI", "certificate", PERSON, object_type="COMPANY_CREDENTIAL",
                                   review_due_date="2026-01-01")

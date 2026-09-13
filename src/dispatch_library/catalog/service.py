@@ -60,15 +60,18 @@ class CatalogLibraryService(LibraryService):
         row, _ = self.catalog.retrieve(object_code, consumer_role=self.consumer_role, for_external_use=False)
         return self._object(row) if row is not None else None
 
-    def current_for_external_use(self, object_code: str, *, purpose: str = "") -> Optional[LibraryObject]:
+    def current_for_external_use(self, object_code: str, *, purpose: str = "",
+                                 consumer_role: Optional[str] = None) -> Optional[LibraryObject]:
         """The current version only if it may leave the building: REVIEW_DUE comes back None."""
-        row, _ = self.catalog.retrieve(object_code, consumer_role=self.consumer_role, purpose=purpose,
-                                       for_external_use=True)
+        row, _ = self.catalog.retrieve(object_code, consumer_role=consumer_role or self.consumer_role,
+                                       purpose=purpose, for_external_use=True)
         return self._object(row) if row is not None else None
 
-    def availability(self, object_code: str, *, purpose: str = "") -> Dict[str, object]:
-        row, outcome = self.catalog.retrieve(object_code, consumer_role=self.consumer_role, purpose=purpose,
-                                             for_external_use=True)
+    def availability(self, object_code: str, *, purpose: str = "",
+                     consumer_role: Optional[str] = None) -> Dict[str, object]:
+        """{"outcome": RETURNED | MISSING | BLOCKED_REVIEW_DUE, "object": LibraryObject | None}."""
+        row, outcome = self.catalog.retrieve(object_code, consumer_role=consumer_role or self.consumer_role,
+                                             purpose=purpose, for_external_use=True)
         return {"outcome": outcome, "object": self._object(row) if row is not None else None}
 
     def list_current(self, collection: Optional[str] = None) -> List[LibraryObject]:
@@ -155,8 +158,8 @@ class CatalogLibraryService(LibraryService):
         )
         return self.registry._with_prior_link(self._object(row))
 
-    def set_lifecycle(self, object_code: str, state: str) -> LibraryObject:
-        return self._object(self.catalog.set_lifecycle(object_code, state))
+    def set_lifecycle(self, object_code: str, state: str, *, by: Optional[str] = None) -> LibraryObject:
+        return self._object(self.catalog.set_lifecycle(object_code, state, by=by))
 
     # ── candidates ───────────────────────────────────────────────────────
 

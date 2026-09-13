@@ -73,6 +73,7 @@ def _parser() -> argparse.ArgumentParser:
     lifecycle = sub.add_parser("lifecycle")
     lifecycle.add_argument("code")
     lifecycle.add_argument("state")
+    lifecycle.add_argument("--by", help="the person renewing an asset that is REVIEW_DUE")
     sub.add_parser("submit").add_argument("--json", required=True)
     sub.add_parser("candidates").add_argument("--status", action="append")
     classify = sub.add_parser("classify")
@@ -134,7 +135,7 @@ def run(argv) -> tuple:
         if c == "list":
             return 0, lib.list_current(args.collection)
         if c == "lifecycle":
-            return 0, lib.set_lifecycle(args.code, args.state)
+            return 0, lib.set_lifecycle(args.code, args.state, by=args.by)
         if c == "submit":
             data = json.loads(Path(args.json).read_text(encoding="utf-8"))
             # source_refs ride beside the contract fields: [["WORKSPACE", "ws-1"], ...]. The shared
