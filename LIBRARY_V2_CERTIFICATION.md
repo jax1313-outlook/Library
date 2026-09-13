@@ -189,6 +189,14 @@ configured.
 
 ## 8. Blocked-work alerts — need Mike
 
+> **Update — Alert 1 ported at Mike Zachary's direction.** `joe/capture-to-card` `8219962` carries the
+> containment, including document upload (kept under the portal data directory; in catalog mode placed
+> in the Library with person, type and SHA-256). Affected suites on that branch: 459 passed, 0 failed.
+> Publisher Phase A passed across separate processes with that branch as Dispatch (Joe-Assistant
+> `d5c6c10`). **Still Mike's:** `D:\Dispatch` is one commit behind its remote until pulled, and the
+> Portal must be restarted to run it. `intelligence.py` and `driver_pin_registry.py` still write
+> their own JSON stores into the memory root — not Library files, not changed.
+
 **Alert 1 — the runtime Dispatch branch does not carry the containment**
 
 | | |
