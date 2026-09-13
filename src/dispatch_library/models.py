@@ -51,14 +51,46 @@ class LibraryObjectSource(str, Enum):
 
 
 class LibraryCandidateStatus(str, Enum):
+    # Additive, plan v2 ruling 4: SUBMITTED -> PENDING_REVIEW -> VALIDATED -> APPROVED.
+    # PENDING_REVIEW, APPROVED and REJECTED keep the names the Intelligence repo uses.
+    SUBMITTED = "SUBMITTED"
     PENDING_REVIEW = "PENDING_REVIEW"
+    VALIDATED = "VALIDATED"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
+    DEFERRED = "DEFERRED"
 
 
 class SubmittedBy(str, Enum):
     INTELLIGENCE = "INTELLIGENCE"
     PUBLISHER = "PUBLISHER"
+    # Additive, plan v2 ruling 2. DISPATCH only with a Mission Record or workflow event.
+    HUMAN = "HUMAN"
+    DISPATCH = "DISPATCH"
+
+
+class LifecycleState(str, Enum):
+    """Where a version stands. CURRENT, ACTIVE_USE and REVIEW_DUE are all current."""
+
+    CURRENT = "CURRENT"
+    ACTIVE_USE = "ACTIVE_USE"
+    REVIEW_DUE = "REVIEW_DUE"
+    SUPERSEDED = "SUPERSEDED"
+    ARCHIVED_VERSION_RECORD = "ARCHIVED_VERSION_RECORD"
+    RETENTION_REVIEW = "RETENTION_REVIEW"
+
+
+CURRENT_STATES = frozenset({LifecycleState.CURRENT, LifecycleState.ACTIVE_USE, LifecycleState.REVIEW_DUE})
+
+#: The eighteen object types of the Library Department Core Object Model, section 4.
+OBJECT_TYPES = (
+    "CONSTITUTION_PACKAGE", "AMENDMENT_CURRENT_RULE", "ROLE_DOCTRINE", "SOP_WORKFLOW",
+    "OPERATIONAL_INSTRUCTION", "COMPLIANCE_ASSET", "CONTROLLED_COMPANY_FACT",
+    "COMPANY_CREDENTIAL", "CAPABILITY_ASSET", "PAST_PERFORMANCE_REFERENCE",
+    "RATE_SHEET_PRICING_TEMPLATE", "PACKET", "PACKET_COMPONENT", "FORM_TEMPLATE",
+    "TRAINING_ASSET_MANUAL", "APPLIED_LESSON_PACKAGE", "VALIDATED_INTELLIGENCE_SUMMARY",
+    "LIBRARY_INDEX_MANIFEST",
+)
 
 
 class RecipeType(str, Enum):
@@ -76,7 +108,25 @@ class RecipeStatus(str, Enum):
 
 # System-identity strings that may never be used as a human approver identity. Prevents a
 # submitting system from approving its own candidate under a slightly different label.
-RESERVED_SYSTEM_IDENTITIES = {"INTELLIGENCE", "PUBLISHER", "LIBRARY", "SYSTEM", "AUTOMATION"}
+# JOE, DISPATCH, COMI and EMAIL_HELPER added by plan v2 ruling 6. Joe may be recorded as the
+# capture channel of an approval, never as the approver.
+RESERVED_SYSTEM_IDENTITIES = {
+    "INTELLIGENCE", "PUBLISHER", "LIBRARY", "JOE", "DISPATCH", "SYSTEM", "AUTOMATION", "COMI",
+    "EMAIL_HELPER",
+}
+
+
+def normalize_identity(name: Optional[str]) -> str:
+    """The comparison form of an identity: trimmed, upper case, spaces and hyphens as `_`.
+
+    Mirrors the catalog schema's `replace(replace(upper(trim(x)),' ','_'),'-','_')` exactly, so
+    `Email Helper` is refused here with a clear message rather than first by the database.
+    """
+    return (name or "").strip().upper().replace(" ", "_").replace("-", "_")
+
+
+def is_reserved_identity(name: Optional[str]) -> bool:
+    return normalize_identity(name) in RESERVED_SYSTEM_IDENTITIES
 
 
 @dataclasses.dataclass
@@ -92,14 +142,30 @@ class LibraryObject:
     accepted_at: str = dataclasses.field(default_factory=_now)
     supersedes_version: Optional[int] = None
     tags: List[str] = dataclasses.field(default_factory=list)
+    # Additive, plan v2. Defaults keep every existing constructor working.
+    version_minor: int = 0
+    object_type: Optional[str] = None
+    lifecycle_state: Optional[str] = None
+    capture_channel: Optional[str] = None
+    library_object_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         require_valid_collection(self.collection)
-        if not self.accepted_by or self.accepted_by.strip().upper() in RESERVED_SYSTEM_IDENTITIES:
+        if not self.accepted_by or not self.accepted_by.strip() or is_reserved_identity(self.accepted_by):
             raise ValueError(
                 "accepted_by must identify a real human or approved-workflow reviewer, "
                 "not a system identity (Hard Rule: no authority bypass)"
             )
+        if self.object_type is not None and self.object_type not in OBJECT_TYPES:
+            raise ValueError(f"object_type {self.object_type!r} is not one of the Core Object Model types")
+
+    @property
+    def version_label(self) -> str:
+        return f"{self.version}.{self.version_minor}"
+
+    @property
+    def blocked_for_external_use(self) -> bool:
+        return self.lifecycle_state == LifecycleState.REVIEW_DUE.value
 
     def to_dict(self) -> Dict[str, Any]:
         return _asdict(self)
@@ -119,12 +185,31 @@ class LibraryCandidate:
     reviewed_at: Optional[str] = None
     candidate_id: str = dataclasses.field(default_factory=_new_id)
     created_at: str = dataclasses.field(default_factory=_now)
+    # Additive, plan v2 rulings 2-5. The first twelve fields stay field-identical to
+    # dispatch_intel.models.LibraryCandidate; everything below has a default.
+    submitted_by_name: Optional[str] = None
+    mission_record_id: Optional[str] = None
+    workflow_event_id: Optional[str] = None
+    recommended_object_type: Optional[str] = None
+    proposed_object_type: Optional[str] = None
+    object_type_confirmed_by: Optional[str] = None
+    object_type_confirmed_at: Optional[str] = None
+    validation_result: str = "NOT_RUN"
+    validated_at: Optional[str] = None
 
     def __post_init__(self) -> None:
         require_valid_collection(self.collection)
 
     def to_dict(self) -> Dict[str, Any]:
         return _asdict(self)
+
+
+#: The fields the Intelligence repository's LibraryCandidate carries, in its order.
+INTELLIGENCE_CANDIDATE_FIELDS = (
+    "submitted_by", "source_type", "collection", "proposed_object_code", "proposed_title",
+    "proposed_body_or_reference", "source_finding_id", "status", "reviewed_by", "reviewed_at",
+    "candidate_id", "created_at",
+)
 
 
 @dataclasses.dataclass

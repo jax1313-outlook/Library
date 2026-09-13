@@ -1,85 +1,138 @@
-"""`open_library()` -- a `LibraryService` backed by the catalog.
+"""`CatalogLibraryService` -- `LibraryService` with a memory, and `open_library()`.
 
-`service.LibraryService` is untouched by the persistence work; it already took
-its registry and queue by injection. This module does the wiring, so the
-dependency points one way: the catalog knows about the service, and the service
-knows nothing about the catalog.
+Every method `LibraryService` had keeps its name, arguments and return type, so Publisher, Joe
+and Intelligence hold the same boundary they held before. What changes is that the answers
+survive the process, and that the stricter v2 rules apply:
 
-Both stores are given the **same connection** on purpose. Approving a candidate
-writes a candidate row and an object row, and those two writes must land
-together or not at all -- a catalog holding an approved candidate whose object
-never arrived has lost a document and recorded that it accepted one.
+  * `ingest_human_document` still accepts directly, with no second gate, but needs an
+    `object_type`. Without one it refuses and a MISSING_FIELD notice records the asset.
+  * `review_candidate` approves only a VALIDATED candidate. `validate_candidate` is Library's
+    step; `confirm_object_type` is the submitting source's or a human's.
+  * `resolve_packet` and `current_for_external_use` never hand out a REVIEW_DUE asset.
+  * `get_recipe` exists. Publisher's `LibraryClient` protocol has always called it.
+
+The service never approves anything itself and never writes to the shelf.
 """
 from __future__ import annotations
 
-import sqlite3
+import os
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional, Union
 
-from dispatch_library import ingestion
-from dispatch_library.catalog import shelf as shelf_module
 from dispatch_library.catalog.connection import open_catalog
-from dispatch_library.catalog.queue import SqliteCandidateQueue
-from dispatch_library.catalog.registry import SqliteObjectRegistry
-from dispatch_library.models import LibraryCandidate, LibraryObject
+from dispatch_library.catalog.queue import SqliteCandidateQueue, candidate_from_row, submit_from_contract
+from dispatch_library.catalog.registry import SqliteObjectRegistry, object_from_row
+from dispatch_library.catalog.store import Catalog, CatalogRefusal, NotFound, ScanReport
+from dispatch_library.models import LibraryCandidate, LibraryObject, PublisherRecipe, RecipeType
+from dispatch_library.recipes import MISSING
 from dispatch_library.service import LibraryService
+
+CATALOG_ENV = "DISPATCH_LIBRARY_CATALOG"
+MEMORY_ENV = "DISPATCH_MEMORY_ROOT"
+
+PathLike = Union[str, Path]
+
+
+def _type_value(recipe_type) -> str:
+    return getattr(recipe_type, "value", recipe_type)
 
 
 class CatalogLibraryService(LibraryService):
-    """`LibraryService` over the catalog, plus the two things a file needs.
-
-    Adds `review_candidate` as one transaction, and `close`. Everything else is
-    inherited unchanged -- `current`, `list_current`, `resolve_packet`,
-    `ingest_human_document`, `submit_candidate`, `pending_candidates`.
-    """
-
-    def __init__(
-        self,
-        connection: sqlite3.Connection,
-        memory_root: Optional[Path | str] = None,
-        **kwargs,
-    ) -> None:
-        self.connection = connection
-        #: The shelf this catalog describes. None means the catalog is not
-        #: bound to one, which is a legitimate state -- an object with an
-        #: inline body needs no shelf at all.
-        self.memory_root = Path(memory_root) if memory_root else None
+    def __init__(self, catalog: Catalog, *, consumer_role: str = "LIBRARY_SERVICE") -> None:
+        self.catalog = catalog
+        self.connection = catalog.db
+        self.memory_root = catalog.memory_root
+        self.consumer_role = consumer_role
         super().__init__(
-            registry=SqliteObjectRegistry(connection),
-            candidate_queue=SqliteCandidateQueue(connection),
-            **kwargs,
+            registry=SqliteObjectRegistry(catalog),
+            candidate_queue=SqliteCandidateQueue(catalog),
         )
 
-    def review_candidate(
-        self, candidate_id: str, approve: bool, reviewed_by: str
-    ) -> LibraryCandidate:
-        """Approve or reject, writing both rows in one transaction.
+    # ── reads ────────────────────────────────────────────────────────────
 
-        `ingestion.review_candidate()` runs unchanged -- every refusal it makes
-        is still its own: an unknown candidate, one already reviewed, a system
-        identity as reviewer, or a submitter approving itself. Those raise
-        before anything is written, and the transaction rolls back.
+    def _object(self, row) -> LibraryObject:
+        obj = object_from_row(row, self.catalog.tags(row["object_code"]))
+        return obj
 
-        What this adds is the guarantee the dict never needed: the candidate's
-        new status and the object it produced commit together.
+    def current(self, object_code: str) -> Optional[LibraryObject]:
+        """The current version, REVIEW_DUE included, with its lifecycle state on it."""
+        row, _ = self.catalog.retrieve(object_code, consumer_role=self.consumer_role, for_external_use=False)
+        return self._object(row) if row is not None else None
+
+    def current_for_external_use(self, object_code: str, *, purpose: str = "") -> Optional[LibraryObject]:
+        """The current version only if it may leave the building: REVIEW_DUE comes back None."""
+        row, _ = self.catalog.retrieve(object_code, consumer_role=self.consumer_role, purpose=purpose,
+                                       for_external_use=True)
+        return self._object(row) if row is not None else None
+
+    def availability(self, object_code: str, *, purpose: str = "") -> Dict[str, object]:
+        row, outcome = self.catalog.retrieve(object_code, consumer_role=self.consumer_role, purpose=purpose,
+                                             for_external_use=True)
+        return {"outcome": outcome, "object": self._object(row) if row is not None else None}
+
+    def list_current(self, collection: Optional[str] = None) -> List[LibraryObject]:
+        return [self._object(row) for row in self.catalog.list_current(collection)]
+
+    def history(self, object_code: str) -> List[LibraryObject]:
+        return self.registry.history(object_code)
+
+    # ── recipes ──────────────────────────────────────────────────────────
+
+    def get_recipe(self, recipe_type) -> Optional[Dict[str, object]]:
+        return self.catalog.recipe(_type_value(recipe_type))
+
+    def load_recipes(self, path: PathLike) -> Dict[str, List[str]]:
+        return self.catalog.load_recipes(Path(path))
+
+    def register_recipe(self, recipe: PublisherRecipe) -> PublisherRecipe:
+        raise CatalogRefusal(
+            "recipes enter the catalog from publisher_recipes.json through load_recipes(), so their "
+            "source and hash are recorded; an in-process PublisherRecipe has neither"
+        )
+
+    def resolve_packet(self, recipe_type) -> Dict[str, object]:
+        """{object_code: LibraryObject | "MISSING"} for the recipe's company items.
+
+        A REVIEW_DUE object resolves to MISSING: Publisher's `pull_libraries` treats anything that
+        is not MISSING as usable, so a blocked credential must not arrive as an object.
+        `resolve_packet_detail` says which MISSING is which.
         """
-        with self.connection:
-            candidate = ingestion.review_candidate(
-                self.candidate_queue, self.registry, candidate_id, approve, reviewed_by
-            )
-            self.candidate_queue.flush(candidate_id)
-        return candidate
+        return {code: (detail["object"] if detail["outcome"] == "RETURNED" else MISSING)
+                for code, detail in self.resolve_packet_detail(recipe_type).items()}
 
-    # ── the shelf ────────────────────────────────────────────────────────
+    def resolve_packet_detail(self, recipe_type) -> Dict[str, Dict[str, object]]:
+        recipe = self.get_recipe(recipe_type)
+        if recipe is None:
+            return {}
+        result = {}
+        for code in recipe["required_library_object_codes"]:
+            result[code] = self.availability(code, purpose=f"resolve_packet {_type_value(recipe_type)}")
+        return result
 
-    def _require_shelf(self) -> Path:
-        if self.memory_root is None:
-            raise ValueError(
-                "this Library is not bound to a shelf; open it with "
-                "open_library(path, memory_root=...) to catalogue files"
-            )
-        return self.memory_root
+    # ── placement ────────────────────────────────────────────────────────
+
+    def ingest_human_document(
+        self,
+        object_code: str,
+        collection: str,
+        title: str,
+        body_or_uri: str,
+        accepted_by: str,
+        tags: Optional[List[str]] = None,
+        *,
+        object_type: Optional[str] = None,
+        capture_channel: Optional[str] = None,
+        capture_ref: Optional[str] = None,
+        minor: bool = False,
+        review_due_date: Optional[str] = None,
+    ) -> LibraryObject:
+        row = self.catalog.place(
+            object_code=object_code, collection=collection, title=title, accepted_by=accepted_by,
+            object_type=object_type, body=body_or_uri, tags=tags or (), minor=minor,
+            capture_channel=capture_channel, capture_ref=capture_ref, review_due_date=review_due_date,
+        )
+        return self.registry._with_prior_link(self._object(row))
 
     def place_file(
         self,
@@ -89,67 +142,66 @@ class CatalogLibraryService(LibraryService):
         relative_path: str,
         accepted_by: str,
         tags: Optional[List[str]] = None,
+        *,
+        object_type: Optional[str] = None,
+        capture_channel: Optional[str] = None,
+        minor: bool = False,
     ) -> LibraryObject:
-        """Accept a file that is already on the shelf as a Library object.
-
-        The file is read -- to hash it and measure it -- and never written,
-        moved or renamed. `body_or_uri` becomes the relative path, so the
-        catalog points at the document instead of holding a second copy of it
-        that can fall out of date.
-
-        `accepted_by` is the approval, exactly as in `ingest_human_document`.
-        This is the only way a file on the shelf becomes a Library object: a
-        scan reports what it finds and never adopts anything, because adoption
-        is an acceptance and an acceptance needs a human's name on it.
-        """
-        root = self._require_shelf()
-        path = root / relative_path
-        if not path.is_file():
-            raise ValueError(f"no file at {relative_path!r} under {root}")
-
-        obj = self.ingest_human_document(
-            object_code=object_code,
-            collection=collection,
-            title=title,
-            body_or_uri=relative_path,
-            accepted_by=accepted_by,
-            tags=tags,
+        """Accept a file already on the shelf. Read to hash; never written, moved or renamed."""
+        row = self.catalog.place(
+            object_code=object_code, collection=collection, title=title, accepted_by=accepted_by,
+            object_type=object_type, relative_path=relative_path, tags=tags or (), minor=minor,
+            capture_channel=capture_channel,
         )
-        self.registry.bind_to_shelf(
-            obj.object_code,
-            obj.version,
-            relative_path=relative_path,
-            content_sha256=shelf_module.sha256_of(path),
-            size_bytes=path.stat().st_size,
-            observed_at=shelf_module._now(),
-        )
-        return obj
+        return self.registry._with_prior_link(self._object(row))
 
-    def read_file(self, object_code: str) -> Optional[str]:
-        """The bytes behind the CURRENT version of a shelf-backed object.
+    def set_lifecycle(self, object_code: str, state: str) -> LibraryObject:
+        return self._object(self.catalog.set_lifecycle(object_code, state))
 
-        Returns None if the object has no file. Raises if the catalog says
-        there is one and there is not -- that is a MISSING finding, and
-        returning None for it would make a missing document look like an
-        object that never had one.
-        """
-        obj = self.current(object_code)
-        if obj is None:
-            return None
-        entry = self.registry.shelf_entry(obj.object_code, obj.version)
-        if entry is None:
-            return None
-        path = self._require_shelf() / entry["relative_path"]
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"{object_code} v{obj.version} stands for {entry['relative_path']!r}, "
-                f"which is not on the shelf"
-            )
-        return path.read_text(encoding="utf-8")
+    # ── candidates ───────────────────────────────────────────────────────
 
-    def scan_shelf(self, *, record: bool = True) -> "shelf_module.ScanResult":
-        """Compare the shelf against the catalog. Writes nothing to the shelf."""
-        return shelf_module.scan(self.connection, self._require_shelf(), record=record)
+    def submit_candidate(self, candidate) -> LibraryCandidate:
+        return submit_from_contract(self.catalog, candidate)
+
+    def candidate(self, candidate_id: str) -> Optional[LibraryCandidate]:
+        return self.candidate_queue.get(candidate_id)
+
+    def classify_candidate(self, candidate_id: str, recommended_object_type: str) -> LibraryCandidate:
+        return candidate_from_row(self.catalog.classify_candidate(candidate_id, recommended_object_type))
+
+    def confirm_object_type(self, candidate_id: str, object_type: str, confirmed_by: str) -> LibraryCandidate:
+        return candidate_from_row(self.catalog.confirm_object_type(candidate_id, object_type, confirmed_by))
+
+    def validate_candidate(self, candidate_id: str) -> Dict[str, object]:
+        passed, problems = self.catalog.validate_candidate(candidate_id)
+        return {"passed": passed, "problems": problems, "candidate": self.candidate(candidate_id)}
+
+    def review_candidate(self, candidate_id: str, approve: bool, reviewed_by: str, *,
+                         capture_channel: Optional[str] = None, capture_ref: Optional[str] = None) -> LibraryCandidate:
+        if self.catalog.candidate_row(candidate_id) is None:
+            raise ValueError(f"no candidate {candidate_id!r} in queue")
+        row = self.catalog.decide_candidate(candidate_id, "APPROVED" if approve else "REJECTED", reviewed_by,
+                                            capture_channel=capture_channel, capture_ref=capture_ref)
+        return candidate_from_row(row)
+
+    def defer_candidate(self, candidate_id: str, reviewed_by: str, notes: str = "") -> LibraryCandidate:
+        return candidate_from_row(self.catalog.decide_candidate(candidate_id, "DEFERRED", reviewed_by, notes=notes))
+
+    def pending_candidates(self) -> List[LibraryCandidate]:
+        return self.candidate_queue.pending()
+
+    # ── notices, shelf, lifecycle ────────────────────────────────────────
+
+    def notices(self, status: Optional[str] = "OPEN") -> List[dict]:
+        return [dict(row) for row in self.catalog.notices(status)]
+
+    def resolve_notice(self, notice_id: str, resolved_by: str, resolution: str) -> dict:
+        return dict(self.catalog.resolve_notice(notice_id, resolved_by, resolution))
+
+    def scan_shelf(self, *, record: bool = True) -> ScanReport:
+        if self.memory_root is None:
+            raise CatalogRefusal("this Library is not bound to a shelf; open it with memory_root")
+        return self.catalog.scan(self.memory_root, record=record)
 
     def close(self) -> None:
         self.connection.close()
@@ -162,30 +214,32 @@ class CatalogLibraryService(LibraryService):
 
 
 def open_library(
-    path: Optional[Path | str] = None,
-    memory_root: Optional[Path | str] = None,
-    **kwargs,
+    path: Optional[PathLike] = None,
+    memory_root: Optional[PathLike] = None,
+    *,
+    consumer_role: str = "LIBRARY_SERVICE",
 ) -> CatalogLibraryService:
-    """Open the Library at `path`, creating or migrating the catalog as needed.
+    """Open the Library at `path`, creating schema version 2 in a new file.
 
-    `path=None` gives an in-memory catalog: the full machinery, nothing on
-    disk. Useful for a test, and honest about what it is -- it forgets, exactly
-    like the dict registry it replaces.
-
-    `memory_root` is the shelf -- `DISPATCH_MEMORY_ROOT`. Without it the
-    Library works on inline bodies and refuses the file operations, which is
-    the true answer on a machine where the shelf is not mounted.
+    `path=None` gives an in-memory catalog with every rule and nothing on disk. `memory_root`
+    is the shelf; without it the Library works on inline bodies and refuses file operations.
     """
-    return CatalogLibraryService(open_catalog(path), memory_root=memory_root, **kwargs)
+    catalog = Catalog(open_catalog(path), memory_root=Path(memory_root) if memory_root else None)
+    return CatalogLibraryService(catalog, consumer_role=consumer_role)
+
+
+def open_configured_library(*, consumer_role: str = "LIBRARY_SERVICE") -> Optional[CatalogLibraryService]:
+    """The Library named by DISPATCH_LIBRARY_CATALOG, bound to DISPATCH_MEMORY_ROOT; None if unset."""
+    path = os.environ.get(CATALOG_ENV, "").strip()
+    if not path:
+        return None
+    memory = os.environ.get(MEMORY_ENV, "").strip() or None
+    return open_library(path, memory_root=memory, consumer_role=consumer_role)
 
 
 @contextmanager
-def library(
-    path: Optional[Path | str] = None,
-    memory_root: Optional[Path | str] = None,
-    **kwargs,
-) -> Iterator[CatalogLibraryService]:
-    """`with library(path) as lib:` -- closes the connection on the way out."""
+def library(path: Optional[PathLike] = None, memory_root: Optional[PathLike] = None,
+            **kwargs) -> Iterator[CatalogLibraryService]:
     service = open_library(path, memory_root=memory_root, **kwargs)
     try:
         yield service

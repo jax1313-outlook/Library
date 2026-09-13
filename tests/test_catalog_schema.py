@@ -1,352 +1,87 @@
-"""What the catalog refuses, and why each refusal is in the database.
+"""The catalog schema is the approved plan, and it refuses what the plan says it refuses.
 
-Every rule checked here is already enforced in `models.py` or `ingestion.py`.
-These tests exist because those rules protect the objects *this package*
-constructs, and a database outlives the code that created it: a migration
-script, a repair session, a future service, or a person with a SQLite browser
-can all write to this file without going through a dataclass.
-
-A rule that only lives in Python is a rule that holds until someone bypasses
-Python.
+`schema_cases` holds every case of LIBRARY_IMPLEMENTATION_PLAN_v2 section 7.2 (run 2), executed
+against `catalog/schema.sql`. A case named REFUSED must be refused by SQLite itself.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
+from pathlib import Path
 
 import pytest
 
-from dispatch_library.catalog import (
-    CatalogVersionError,
-    SCHEMA_VERSION,
-    connect,
-    current_version,
-    migrate,
-    open_catalog,
-)
+import schema_cases
+from dispatch_library.models import OBJECT_TYPES, RESERVED_SYSTEM_IDENTITIES
+from dispatch_library.taxonomy import COLLECTIONS
 
-OBJECT_COLUMNS = (
-    "object_code, version, collection, title, status, source, "
-    "body_or_uri, accepted_by, accepted_at, relative_path"
-)
+ROOT = Path(__file__).resolve().parent.parent
+PLAN = ROOT / "LIBRARY_IMPLEMENTATION_PLAN_v2.md"
 
 
-def _object(connection, **overrides):
-    row = dict(
-        object_code="DOC-1",
-        version=1,
-        collection="Reference",
-        title="A document",
-        status="CURRENT",
-        source="HUMAN_PLACED",
-        body_or_uri="Reference/doc.md",
-        accepted_by="Mike Zachary",
-        accepted_at="2026-09-13T00:00:00+00:00",
-        relative_path=None,
-    )
-    row.update(overrides)
-    connection.execute(
-        f"INSERT INTO library_object ({OBJECT_COLUMNS}) VALUES (:object_code, :version, "
-        ":collection, :title, :status, :source, :body_or_uri, :accepted_by, :accepted_at, "
-        ":relative_path)",
-        row,
-    )
-    return row
+def _plan_block() -> str:
+    text = PLAN.read_text(encoding="utf-8")
+    end = "-- END CORRECTED SCHEMA v2"
+    return text[text.index("-- BEGIN CORRECTED SCHEMA v2"):text.index(end) + len(end)]
 
 
-CANDIDATE_COLUMNS = (
-    "candidate_id, submitted_by, source_type, collection, proposed_object_code, "
-    "proposed_title, proposed_body_or_reference, status, reviewed_by, created_at"
-)
+def test_schema_file_is_the_approved_plan_verbatim():
+    schema = schema_cases.SCHEMA
+    block = _plan_block()
+    assert block in schema, "catalog/schema.sql no longer matches LIBRARY_IMPLEMENTATION_PLAN_v2 section 2"
 
 
-def _candidate(connection, **overrides):
-    row = dict(
-        candidate_id="cand-1",
-        submitted_by="INTELLIGENCE",
-        source_type="finding",
-        collection="Reference",
-        proposed_object_code="DOC-9",
-        proposed_title="Proposed",
-        proposed_body_or_reference="body",
-        status="PENDING_REVIEW",
-        reviewed_by=None,
-        created_at="2026-09-13T00:00:00+00:00",
-    )
-    row.update(overrides)
-    connection.execute(
-        f"INSERT INTO library_candidate ({CANDIDATE_COLUMNS}) VALUES (:candidate_id, "
-        ":submitted_by, :source_type, :collection, :proposed_object_code, :proposed_title, "
-        ":proposed_body_or_reference, :status, :reviewed_by, :created_at)",
-        row,
-    )
-    return row
+@pytest.mark.parametrize("status,name,detail", schema_cases.RESULTS, ids=[r[1] for r in schema_cases.RESULTS])
+def test_schema_case(status, name, detail):
+    assert status in ("REFUSED", "ACCEPTED"), detail
 
 
-@pytest.fixture()
-def catalog():
-    connection = open_catalog()
-    yield connection
-    connection.close()
+def test_case_counts_match_the_plan_record():
+    refused = sum(r[0] == "REFUSED" for r in schema_cases.RESULTS)
+    accepted = sum(r[0] == "ACCEPTED" for r in schema_cases.RESULTS)
+    assert (refused, accepted) == (99, 22)
 
 
-class TestTheCatalogOpens:
-    def test_a_new_catalog_is_at_the_current_schema_version(self, catalog):
-        assert current_version(catalog) == SCHEMA_VERSION
-
-    def test_every_table_the_schema_declares_is_present(self, catalog):
-        present = {
-            row["name"]
-            for row in catalog.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        }
-        assert {
-            "library_object", "library_object_tag", "library_candidate",
-            "publisher_recipe", "recipe_requirement", "archive_review_queue",
-            "catalog_scan", "catalog_finding", "schema_version",
-        } <= present
-
-    def test_foreign_keys_are_on_for_the_connection(self, catalog):
-        """Per-connection in SQLite, not a property of the file. Setting it only
-        in schema.sql would enforce it once, on the connection that created the
-        database, and never again."""
-        assert catalog.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-
-    def test_migrating_twice_changes_nothing(self, catalog):
-        assert migrate(catalog) == SCHEMA_VERSION
-        assert migrate(catalog) == SCHEMA_VERSION
-        rows = catalog.execute("SELECT count(*) AS n FROM schema_version").fetchone()["n"]
-        assert rows == 1
-
-    def test_an_empty_database_reports_version_zero(self):
-        connection = connect()
-        assert current_version(connection) == 0
-        connection.close()
-
-    def test_a_catalog_from_a_newer_library_is_refused(self):
-        """Opening it read-write would quietly drop columns the newer version
-        writes. Refusing is the safe answer, and it names the two versions."""
-        connection = open_catalog()
-        connection.execute(
-            "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-            (SCHEMA_VERSION + 1, "2027-01-01T00:00:00+00:00"),
-        )
-        with pytest.raises(CatalogVersionError) as raised:
-            migrate(connection)
-        assert str(SCHEMA_VERSION + 1) in str(raised.value)
-        connection.close()
-
-    def test_a_catalog_on_disk_survives_being_closed(self, tmp_path):
-        path = tmp_path / "nested" / "catalog.db"
-        first = open_catalog(path)
-        _object(first)
-        first.commit()
-        first.close()
-
-        second = open_catalog(path)
-        assert second.execute("SELECT count(*) AS n FROM library_object").fetchone()["n"] == 1
-        assert current_version(second) == SCHEMA_VERSION
-        second.close()
+def test_shape_matches_the_plan_record():
+    db = schema_cases.fresh()
+    tables = db.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchone()[0]
+    views = db.execute("SELECT count(*) FROM sqlite_master WHERE type='view'").fetchone()[0]
+    triggers = db.execute("SELECT count(*) FROM sqlite_master WHERE type='trigger'").fetchone()[0]
+    assert (tables, views, triggers) == (19, 4, 34)
 
 
-class TestItRefusesASecondCurrentVersion:
-    """The resolver returns the first CURRENT row it finds. Two of them would
-    make `library.current()` non-deterministic -- and a Publisher packet built
-    from the wrong one is wrong in a way nobody would notice."""
-
-    def test_one_object_code_may_not_hold_two_current_versions(self, catalog):
-        _object(catalog)
-        with pytest.raises(sqlite3.IntegrityError):
-            _object(catalog, version=2)
-
-    def test_superseding_the_first_makes_room_for_the_second(self, catalog):
-        _object(catalog)
-        catalog.execute("UPDATE library_object SET status = 'SUPERSEDED' WHERE version = 1")
-        _object(catalog, version=2, supersedes_version=1)
-
-        statuses = dict(
-            catalog.execute("SELECT version, status FROM library_object ORDER BY version")
-        )
-        assert statuses == {1: "SUPERSEDED", 2: "CURRENT"}
-
-    def test_many_superseded_versions_are_fine(self, catalog):
-        for version in range(1, 6):
-            catalog.execute("UPDATE library_object SET status = 'SUPERSEDED'")
-            _object(catalog, version=version)
-        assert catalog.execute(
-            "SELECT count(*) AS n FROM library_object WHERE status = 'SUPERSEDED'"
-        ).fetchone()["n"] == 4
+def test_seeded_collections_are_the_taxonomy():
+    db = schema_cases.fresh()
+    assert tuple(r[0] for r in db.execute("SELECT collection_id FROM library_collection ORDER BY rowid")) == COLLECTIONS
 
 
-class TestItRefusesTwoObjectsOnOneShelfFile:
-    """Better refused at write time than discovered by a packet that resolves
-    the same document under two names."""
+def test_every_refused_identity_list_is_the_python_constant():
+    """Six CHECKs refuse system identities. Four carry exactly the nine (submitter name, reviewer,
+    approver, archive decider); the object-type confirmer carries the nine plus HUMAN; the notice
+    resolver carries the six that are never an authorised source. (Plan v2 section 7.2 said the
+    nine-name list "appears in six CHECKs"; that sentence counted all six lists as the nine.)"""
+    from dispatch_library.catalog.store import NOTICE_RESOLVER_REFUSED
 
-    def test_two_current_objects_may_not_claim_the_same_file(self, catalog):
-        _object(catalog, relative_path="Templates/closeout.md")
-        with pytest.raises(sqlite3.IntegrityError):
-            _object(catalog, object_code="DOC-2", relative_path="Templates/closeout.md")
-
-    def test_a_superseded_version_may_keep_its_path(self, catalog):
-        """Version history is the point of a Library. A superseded version that
-        had to give up its path would lose the record of what it pointed at."""
-        _object(catalog, relative_path="Templates/closeout.md")
-        catalog.execute("UPDATE library_object SET status = 'SUPERSEDED'")
-        _object(catalog, version=2, relative_path="Templates/closeout.md")
-        assert catalog.execute(
-            "SELECT count(*) AS n FROM library_object WHERE relative_path = 'Templates/closeout.md'"
-        ).fetchone()["n"] == 2
-
-    def test_objects_with_no_file_do_not_collide(self, catalog):
-        """An inline body is not a shelf file, and NULL is not a duplicate of
-        NULL. Any number of objects may have no path at all."""
-        _object(catalog, relative_path=None)
-        _object(catalog, object_code="DOC-2", relative_path=None)
-        _object(catalog, object_code="DOC-3", relative_path=None)
-        assert catalog.execute("SELECT count(*) AS n FROM library_object").fetchone()["n"] == 3
+    lists = [s for s in (set(re.findall(r"'([A-Z_]+)'", found)) for found in re.findall(
+        r"NOT IN\s*\(((?:'[A-Z_]+',?)+)\)", schema_cases.SCHEMA)) if "SYSTEM" in s]
+    nine = [s for s in lists if s == RESERVED_SYSTEM_IDENTITIES]
+    assert len(nine) == 4
+    assert RESERVED_SYSTEM_IDENTITIES | {"HUMAN"} in lists
+    assert set(NOTICE_RESOLVER_REFUSED) in lists
+    assert len(lists) == 6
 
 
-class TestItRefusesASystemIdentityAsAnApproval:
-    """Hard Rule: no authority bypass. A system may not stand as the human who
-    accepted a document, under its own name or a lowercase one."""
-
-    @pytest.mark.parametrize(
-        "identity", ["INTELLIGENCE", "PUBLISHER", "LIBRARY", "SYSTEM", "AUTOMATION"]
-    )
-    def test_no_system_identity_may_accept_an_object(self, catalog, identity):
-        with pytest.raises(sqlite3.IntegrityError):
-            _object(catalog, accepted_by=identity)
-
-    @pytest.mark.parametrize("identity", ["publisher", "  Publisher  ", "sYsTeM"])
-    def test_case_and_padding_do_not_get_around_it(self, catalog, identity):
-        with pytest.raises(sqlite3.IntegrityError):
-            _object(catalog, accepted_by=identity)
-
-    def test_an_empty_approval_is_refused(self, catalog):
-        with pytest.raises(sqlite3.IntegrityError):
-            _object(catalog, accepted_by="")
-
-    def test_a_real_person_is_accepted(self, catalog):
-        _object(catalog, accepted_by="Mike Zachary")
-        assert catalog.execute(
-            "SELECT accepted_by FROM library_object"
-        ).fetchone()["accepted_by"] == "Mike Zachary"
-
-    def test_a_version_number_must_be_positive(self, catalog):
-        with pytest.raises(sqlite3.IntegrityError):
-            _object(catalog, version=0)
+def test_every_object_type_list_is_the_python_constant():
+    lists = re.findall(r"IN \(\s*'CONSTITUTION_PACKAGE'.*?'LIBRARY_INDEX_MANIFEST'\)", schema_cases.SCHEMA, flags=re.S)
+    assert len(lists) == 4
+    for found in lists:
+        assert tuple(re.findall(r"'([A-Z_]+)'", found)) == OBJECT_TYPES
 
 
-class TestItRefusesAnApprovalWithNobodyBehindIt:
-    def test_a_pending_candidate_may_not_carry_a_reviewer(self, catalog):
-        """A reviewer on a pending candidate means one of the two fields is a
-        lie, and there is no way to tell which."""
-        with pytest.raises(sqlite3.IntegrityError):
-            _candidate(catalog, status="PENDING_REVIEW", reviewed_by="Mike Zachary")
+def test_python_normalisation_matches_the_database():
+    from dispatch_library.models import normalize_identity
 
-    @pytest.mark.parametrize("status", ["APPROVED", "REJECTED"])
-    def test_a_decided_candidate_must_carry_one(self, catalog, status):
-        with pytest.raises(sqlite3.IntegrityError):
-            _candidate(catalog, status=status, reviewed_by=None)
-
-    def test_a_submitter_may_not_approve_its_own_candidate(self, catalog):
-        with pytest.raises(sqlite3.IntegrityError):
-            _candidate(catalog, submitted_by="INTELLIGENCE", status="APPROVED",
-                       reviewed_by="INTELLIGENCE")
-
-    @pytest.mark.parametrize("identity", ["PUBLISHER", "LIBRARY", "SYSTEM", "AUTOMATION"])
-    def test_no_system_identity_may_review_a_candidate(self, catalog, identity):
-        with pytest.raises(sqlite3.IntegrityError):
-            _candidate(catalog, submitted_by="INTELLIGENCE", status="APPROVED",
-                       reviewed_by=identity)
-
-    def test_a_human_review_is_accepted(self, catalog):
-        _candidate(catalog, status="APPROVED", reviewed_by="Mike Zachary")
-        assert catalog.execute(
-            "SELECT reviewed_by FROM library_candidate"
-        ).fetchone()["reviewed_by"] == "Mike Zachary"
-
-    def test_a_pending_candidate_with_no_reviewer_is_accepted(self, catalog):
-        _candidate(catalog)
-        assert catalog.execute(
-            "SELECT count(*) AS n FROM library_candidate WHERE status = 'PENDING_REVIEW'"
-        ).fetchone()["n"] == 1
-
-
-class TestItRefusesAnArchiveDispositionWithNoName:
-    """The queue prepares Mike's Keep/Delete decision. A disposition with
-    nobody behind it is not a decision, it is an accident."""
-
-    @pytest.fixture()
-    def queued(self, catalog):
-        _object(catalog, status="SUPERSEDED")
-        return catalog
-
-    @pytest.mark.parametrize("disposition", ["KEEP", "DELETE"])
-    def test_a_decision_requires_a_decider(self, queued, disposition):
-        with pytest.raises(sqlite3.IntegrityError):
-            queued.execute(
-                "INSERT INTO archive_review_queue (object_code, version, queued_at, disposition) "
-                "VALUES ('DOC-1', 1, '2026-09-13', ?)",
-                (disposition,),
-            )
-
-    def test_a_pending_entry_may_not_carry_one(self, queued):
-        with pytest.raises(sqlite3.IntegrityError):
-            queued.execute(
-                "INSERT INTO archive_review_queue "
-                "(object_code, version, queued_at, disposition, decided_by) "
-                "VALUES ('DOC-1', 1, '2026-09-13', 'PENDING', 'Mike Zachary')"
-            )
-
-    def test_a_named_decision_is_accepted(self, queued):
-        queued.execute(
-            "INSERT INTO archive_review_queue "
-            "(object_code, version, queued_at, disposition, decided_by, decided_at) "
-            "VALUES ('DOC-1', 1, '2026-09-13', 'KEEP', 'Mike Zachary', '2026-09-14')"
-        )
-        assert queued.execute(
-            "SELECT decided_by FROM archive_review_queue"
-        ).fetchone()["decided_by"] == "Mike Zachary"
-
-    def test_it_may_not_queue_a_version_that_does_not_exist(self, queued):
-        """A foreign key, enforced because open_catalog turns foreign keys on."""
-        with pytest.raises(sqlite3.IntegrityError):
-            queued.execute(
-                "INSERT INTO archive_review_queue (object_code, version, queued_at) "
-                "VALUES ('DOC-NOPE', 7, '2026-09-13')"
-            )
-
-    def test_removing_a_version_removes_its_queue_entry(self, queued):
-        queued.execute(
-            "INSERT INTO archive_review_queue (object_code, version, queued_at) "
-            "VALUES ('DOC-1', 1, '2026-09-13')"
-        )
-        queued.execute("DELETE FROM library_object WHERE object_code = 'DOC-1'")
-        assert queued.execute(
-            "SELECT count(*) AS n FROM archive_review_queue"
-        ).fetchone()["n"] == 0
-
-
-class TestTheVocabularyIsClosed:
-    """Status and source words are the Dispatch vocabulary. A synonym written
-    into the database would be a word no reader of this program knows."""
-
-    @pytest.mark.parametrize("status", ["current", "ACTIVE", "LIVE", "", "PENDING"])
-    def test_only_the_three_object_statuses_are_accepted(self, catalog, status):
-        with pytest.raises(sqlite3.IntegrityError):
-            _object(catalog, status=status)
-
-    @pytest.mark.parametrize("source", ["human", "MIKE", "IMPORTED", ""])
-    def test_only_the_two_sources_are_accepted(self, catalog, source):
-        with pytest.raises(sqlite3.IntegrityError):
-            _object(catalog, source=source)
-
-    @pytest.mark.parametrize("finding", ["UNKNOWN", "ok", ""])
-    def test_only_the_three_scan_findings_are_accepted(self, catalog, finding):
-        catalog.execute(
-            "INSERT INTO catalog_scan (started_at, memory_root) VALUES ('t', '/shelf')"
-        )
-        with pytest.raises(sqlite3.IntegrityError):
-            catalog.execute(
-                "INSERT INTO catalog_finding (scan_id, relative_path, finding) VALUES (1, 'a', ?)",
-                (finding,),
-            )
+    db = sqlite3.connect(":memory:")
+    for name in (" publisher ", "Email Helper", "email-helper", "Joe Smith", "Mike Zachary", "COMI"):
+        sql = db.execute("SELECT replace(replace(upper(trim(?)),' ','_'),'-','_')", (name,)).fetchone()[0]
+        assert normalize_identity(name) == sql

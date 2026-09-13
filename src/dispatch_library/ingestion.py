@@ -24,8 +24,9 @@ from dispatch_library.models import (
     LibraryObject,
     LibraryObjectSource,
     LibraryObjectStatus,
-    RESERVED_SYSTEM_IDENTITIES,
     _now,
+    is_reserved_identity,
+    normalize_identity,
 )
 from dispatch_library.registry import ObjectRegistry
 
@@ -58,6 +59,7 @@ def ingest_human_document(
     body_or_uri: str,
     accepted_by: str,
     tags: Optional[List[str]] = None,
+    object_type: Optional[str] = None,
 ) -> LibraryObject:
     version = registry.next_version(object_code)
     obj = LibraryObject(
@@ -71,6 +73,7 @@ def ingest_human_document(
         accepted_by=accepted_by,
         supersedes_version=(version - 1) if version > 1 else None,
         tags=list(tags or []),
+        object_type=object_type,
     )
     return registry.add_version(obj)
 
@@ -93,12 +96,12 @@ def review_candidate(
         raise ValueError(f"no candidate {candidate_id!r} in queue")
     if candidate.status != LibraryCandidateStatus.PENDING_REVIEW:
         raise ValueError(f"candidate {candidate_id!r} already reviewed (status={candidate.status})")
-    if not reviewed_by or reviewed_by.strip().upper() in RESERVED_SYSTEM_IDENTITIES:
+    if not reviewed_by or not reviewed_by.strip() or is_reserved_identity(reviewed_by):
         raise ValueError(
             "reviewed_by must identify a real human or approved-workflow reviewer, "
             "not a system identity (Hard Rule: Publisher/Intelligence may not approve themselves)"
         )
-    if reviewed_by.strip().upper() == candidate.submitted_by.value:
+    if normalize_identity(reviewed_by) == candidate.submitted_by.value:
         raise ValueError("reviewed_by must not equal the submitting system's own identity")
 
     candidate.reviewed_by = reviewed_by

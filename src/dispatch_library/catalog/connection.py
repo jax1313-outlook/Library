@@ -1,20 +1,28 @@
-"""Opening the catalog, and bringing it up to the current schema version.
+"""Opening the catalog, and refusing any file this Library must not write to.
 
-One function matters here: `open_catalog()`. It returns a connection with the
-pragmas that make SQLite safe for a program that may be running beside the
-Portal, and it applies any migration the file has not seen.
+One function matters here: `open_catalog()`. It returns a connection with the pragmas that make
+SQLite safe for a program that may run beside the Portal, creates schema version 2 in a fresh
+file, and refuses everything else.
 
-Two pragma decisions are worth reading before changing them:
+What it refuses, and why:
 
-  * `journal_mode = WAL` is issued **before** anything else, and deliberately
-    not from `schema.sql`. It does not honour `busy_timeout` -- it takes an
-    exclusive lock and fails immediately if another connection holds one -- so
-    it is issued once, at open, with a retry around it rather than buried in a
-    script where a lock failure would look like a corrupt schema.
+  * **SQLite older than 3.31.** The schema uses a generated column and deferred foreign keys.
+    On an older SQLite the script would fail halfway, or worse, run without the rule.
+  * **A schema-version-1 file.** Version 1 was the superseded schema built by the S1-S5 work.
+    It has no immutable ids, no approval records and no notices. Converting it would mean
+    inventing the approval records it never kept, so it is refused, not migrated. No such file
+    existed anywhere on D: when this was written.
+  * **A file from a newer Library.** Opening it read-write could drop columns this code does
+    not know it should keep.
+  * **A non-empty file that is not a catalog.** Something else lives there.
 
-  * `foreign_keys = ON` is per-connection in SQLite, not a property of the
-    file. Setting it in `schema.sql` alone would enforce it exactly once, on
-    the connection that created the database, and never again.
+Two pragma decisions worth reading before changing them:
+
+  * `journal_mode = WAL` is issued once at open, with a retry, and not from `schema.sql`. It
+    does not honour `busy_timeout`, so a lock at that moment would otherwise look like a corrupt
+    schema.
+  * `foreign_keys = ON` is per connection, not a property of the file, so it is set on every
+    open. Without it the deferred approval-to-version key would never be checked.
 """
 from __future__ import annotations
 
@@ -22,15 +30,18 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+MINIMUM_SQLITE = (3, 31, 0)
 
 _SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
-#: SQLite's own default is five seconds, which is short for a laptop writing
-#: evidence files at the same time.
+#: SQLite's own default is five seconds, which is short for a laptop that is also writing
+#: evidence files. A writer waits this long for another writer before giving up.
 DEFAULT_TIMEOUT_SECONDS = 30.0
+
+PathLike = Union[str, Path]
 
 
 class CatalogError(RuntimeError):
@@ -38,42 +49,58 @@ class CatalogError(RuntimeError):
 
 
 class CatalogVersionError(CatalogError):
-    """The file was written by a newer Library than this one.
+    """The file holds a schema version this Library will not write to."""
 
-    Refusing is the point. A newer schema may carry columns this code does not
-    write, and opening it read-write would quietly drop them.
-    """
+
+class CatalogBusyError(CatalogError):
+    """Another connection held the write lock for longer than the busy timeout."""
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _enable_wal(connection: sqlite3.Connection, attempts: int = 5) -> None:
+def sqlite_version() -> tuple:
+    return tuple(int(part) for part in sqlite3.sqlite_version.split("."))
+
+
+def require_supported_sqlite() -> None:
+    if sqlite_version() < MINIMUM_SQLITE:
+        raise CatalogError(
+            f"SQLite {sqlite3.sqlite_version} is too old for the Library catalog; "
+            f"{'.'.join(map(str, MINIMUM_SQLITE))} or later is required "
+            "(generated columns and deferred foreign keys)."
+        )
+
+
+def _enable_wal(connection: sqlite3.Connection, attempts: int = 5) -> str:
     """Turn on WAL, retrying briefly if another connection holds the lock.
 
-    Failure is not fatal. An in-memory database cannot use WAL at all, and a
-    catalog on a filesystem that does not support it still works -- just with
-    less concurrency. Refusing to open the catalog over a journal-mode
-    preference would be a worse outcome than the preference not being met.
+    Returns the journal mode actually in force. A filesystem that cannot do WAL still gets a
+    working catalog, with less concurrency, and the caller can see which it got.
     """
     for attempt in range(attempts):
         try:
-            connection.execute("PRAGMA journal_mode = WAL")
-            return
+            return connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
         except sqlite3.OperationalError:
             if attempt == attempts - 1:
-                return
+                break
             time.sleep(0.1 * (attempt + 1))
+    return connection.execute("PRAGMA journal_mode").fetchone()[0]
 
 
-def connect(path: Optional[Path | str] = None, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> sqlite3.Connection:
-    """A connection with the catalog's pragmas applied. No schema work."""
+def connect(path: Optional[PathLike] = None, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> sqlite3.Connection:
+    """A connection with the catalog's pragmas applied. No schema work.
+
+    `isolation_level=None` puts transactions in this package's hands: every write path opens
+    `BEGIN IMMEDIATE` itself, so the write lock is taken before the first read of a
+    transaction, not upgraded halfway through it where SQLite cannot wait for it.
+    """
+    require_supported_sqlite()
     target = ":memory:" if path is None else str(path)
     if path is not None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-
-    connection = sqlite3.connect(target, timeout=timeout)
+    connection = sqlite3.connect(target, timeout=timeout, isolation_level=None, check_same_thread=False)
     connection.row_factory = sqlite3.Row
     if path is not None:
         _enable_wal(connection)
@@ -82,65 +109,89 @@ def connect(path: Optional[Path | str] = None, *, timeout: float = DEFAULT_TIMEO
     return connection
 
 
+def _tables(connection: sqlite3.Connection) -> set:
+    return {
+        row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+
+
 def current_version(connection: sqlite3.Connection) -> int:
     """The schema version of an open catalog; 0 for an empty database."""
-    row = connection.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
-    ).fetchone()
-    if row is None:
+    tables = _tables(connection)
+    if "schema_version" not in tables:
         return 0
     row = connection.execute("SELECT max(version) AS v FROM schema_version").fetchone()
     return int(row["v"]) if row and row["v"] is not None else 0
 
 
 def migrate(connection: sqlite3.Connection) -> int:
-    """Bring an open catalog to `SCHEMA_VERSION`. Returns the version applied.
-
-    Idempotent: running it against a current catalog does nothing and returns
-    the version it already had.
-    """
+    """Bring an open catalog to `SCHEMA_VERSION`, or refuse it. Returns the version in force."""
+    tables = _tables(connection)
     version = current_version(connection)
 
-    if version > SCHEMA_VERSION:
-        raise CatalogVersionError(
-            f"catalog is at schema version {version}; this Library understands "
-            f"{SCHEMA_VERSION}. Refusing to open it rather than risk dropping "
-            f"columns a newer version writes."
-        )
     if version == SCHEMA_VERSION:
         return version
+    if version > SCHEMA_VERSION:
+        raise CatalogVersionError(
+            f"catalog is at schema version {version}; this Library writes version {SCHEMA_VERSION}. "
+            "Refusing to open it rather than risk dropping columns a newer version keeps."
+        )
+    if version == 1 or ("library_object" in tables and "library_version" not in tables):
+        raise CatalogVersionError(
+            "this is a schema-version-1 catalog from the superseded S1-S5 implementation. "
+            "Version 2 keeps immutable ids, approval records and notices that version 1 never "
+            "recorded, so it is not converted: converting would mean inventing those records. "
+            "Move the file aside and open a new catalog."
+        )
+    if tables:
+        raise CatalogError(
+            f"the database holds tables ({', '.join(sorted(tables))}) but no Library schema "
+            "version. It is not a Library catalog; refusing to write to it."
+        )
 
-    if version == 0:
-        # The whole script runs inside one transaction. A schema left half
-        # created is worse than no schema at all, because the next open would
-        # read a version of 0 and try to create the tables that already exist.
-        with connection:
-            connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
-            connection.execute(
-                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                (SCHEMA_VERSION, _now()),
-            )
-        # executescript() commits any open transaction before it runs, which
-        # clears the PRAGMA set at connect time on some builds. Re-assert it.
-        connection.execute("PRAGMA foreign_keys = ON")
-        return SCHEMA_VERSION
-
-    # No migration from 1 exists yet. When one does, it goes here as an
-    # explicit step -- never as a blind re-run of schema.sql over live data.
-    raise CatalogError(  # pragma: no cover - unreachable while SCHEMA_VERSION == 1
-        f"no migration path from schema version {version} to {SCHEMA_VERSION}"
-    )
+    script = _SCHEMA_PATH.read_text(encoding="utf-8")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        # executescript() would COMMIT first; running the statements one by one keeps the whole
+        # schema in this transaction, so a failure leaves an empty file rather than half a schema.
+        for statement in _statements(script):
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_version (version, applied_at, description) VALUES (?, ?, ?)",
+            (SCHEMA_VERSION, _now(), "Library catalog v2 (LIBRARY_IMPLEMENTATION_PLAN_v2)"),
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+    connection.execute("PRAGMA foreign_keys = ON")
+    return SCHEMA_VERSION
 
 
-def open_catalog(
-    path: Optional[Path | str] = None,
-    *,
-    timeout: float = DEFAULT_TIMEOUT_SECONDS,
-) -> sqlite3.Connection:
-    """Open the catalog at `path`, creating or migrating it as needed.
+def _statements(script: str):
+    """Split the schema into complete statements, triggers included."""
+    buffer = ""
+    for line in script.splitlines(keepends=True):
+        if line.lstrip().startswith("--") and not buffer.strip():
+            continue
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            statement = buffer.strip()
+            buffer = ""
+            if statement.upper().startswith("PRAGMA"):
+                continue  # pragmas are set by connect(), outside the transaction
+            yield statement
+    if buffer.strip():
+        raise CatalogError("schema.sql ends with an incomplete statement")
 
-    `path=None` opens an in-memory catalog, which is what the tests use and
-    what makes the registry runnable with no file on disk.
+
+def open_catalog(path: Optional[PathLike] = None, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> sqlite3.Connection:
+    """Open the catalog at `path`, creating schema version 2 in a new file, refusing any other.
+
+    `path=None` opens an in-memory catalog: the full rules, nothing on disk, forgotten on close.
     """
     connection = connect(path, timeout=timeout)
     try:

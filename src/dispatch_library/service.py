@@ -22,6 +22,10 @@ from dispatch_library.registry import ObjectRegistry
 from dispatch_library.recipes import RecipeRegistry
 
 
+def _value(recipe_type) -> str:
+    return getattr(recipe_type, "value", recipe_type)
+
+
 class LibraryService:
     def __init__(
         self,
@@ -39,8 +43,41 @@ class LibraryService:
     def list_current(self, collection: Optional[str] = None) -> List[LibraryObject]:
         return resolver.list_current(self.registry, collection)
 
-    def resolve_packet(self, recipe_type: RecipeType) -> Dict[str, object]:
-        return recipes_mod.resolve_packet(self.registry, self.recipe_registry, recipe_type)
+    def resolve_packet(self, recipe_type) -> Dict[str, object]:
+        """Accepts a `RecipeType` or its string value -- Publisher's LibraryClient passes a string."""
+        return recipes_mod.resolve_packet(self.registry, self.recipe_registry, RecipeType(_value(recipe_type)))
+
+    def get_recipe(self, recipe_type) -> Optional[Dict[str, object]]:
+        """`LibraryClient.get_recipe(recipe_type)`: the current recipe as a dict, or None.
+
+        Publisher's protocol has always declared this method; LibraryService lacked it until plan
+        v2. The dict carries `required_library_object_codes`, the key Publisher's StubLibraryClient
+        reads, plus every field the recipe source supplied.
+        """
+        try:
+            rtype = RecipeType(_value(recipe_type))
+        except ValueError:
+            return None
+        recipe = self.recipe_registry.get_current(rtype)
+        if recipe is None:
+            return None
+        detail = self.recipe_registry.detail(recipe.recipe_code)
+        return {
+            "recipe_code": recipe.recipe_code,
+            "recipe_type": rtype.value,
+            "version": recipe.version,
+            "status": recipe.status.value,
+            "is_placeholder": detail is None,
+            "recipe_name": detail.recipe_name if detail else None,
+            "source_key": detail.source_key if detail else None,
+            "source_path": detail.source_path if detail else None,
+            "human_review_required": detail.human_review_required if detail else None,
+            "required_library_object_codes": list(recipe.required_library_object_codes),
+            "required_publisher_parts": list(recipe.required_publisher_parts),
+            "required_human_items": list(detail.required_human_items) if detail else [],
+            "required_outputs": list(detail.required_outputs) if detail else [],
+            "required_intelligence_requirement_types": list(recipe.required_intelligence_requirement_types),
+        }
 
     def register_recipe(self, recipe: PublisherRecipe) -> PublisherRecipe:
         return self.recipe_registry.register(recipe)
