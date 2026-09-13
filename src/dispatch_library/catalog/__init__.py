@@ -18,7 +18,20 @@ from dispatch_library.catalog.connection import (
     open_catalog,
 )
 
+from dispatch_library.catalog.queue import SqliteCandidateQueue
+from dispatch_library.catalog.registry import SqliteObjectRegistry
+from dispatch_library.catalog.service import (
+    CatalogLibraryService,
+    library,
+    open_library,
+)
+
 __all__ = [
+    "CatalogLibraryService",
+    "SqliteCandidateQueue",
+    "SqliteObjectRegistry",
+    "library",
+    "open_library",
     "CatalogError",
     "CatalogVersionError",
     "SCHEMA_VERSION",
