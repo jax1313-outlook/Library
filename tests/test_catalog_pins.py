@@ -1,7 +1,7 @@
 """The Library PIN Service: Operations, Driver and Customer portal entry.
 
 Mike Zachary, 2026-09-13: drivers create their own PIN, no more than four characters, and
-nobody assigns one; with five drivers the PIN alone signs a driver in; a customer's load number is their PIN; an Operations PIN is authorized by
+nobody assigns one; any held driver PIN opens the Driver portal; a customer's load number is their PIN; an Operations PIN is authorized by
 Mike Zachary by voice or in the dialog box with Joe.
 """
 from __future__ import annotations
@@ -44,18 +44,18 @@ def ops(pins, name=MIKE, pin="7301", channel="DIALOG"):
 class TestTheFourAnswers:
     def test_operations_driver_customer_and_denied(self, pins):
         ops(pins)
-        pins.set_driver_pin(RAY, RAY_ID, "4418")
+        pins.add_driver_pin("4418")
         pins.add_customer_load("XPO Logistics", "8842193", requested_by=MIKE)
 
         assert pins.validate("Operations", "7301", client_key="laptop").answer()["role"] == "Operations"
         driver = pins.validate("Driver", "4418", client_key="tablet").answer()
-        assert (driver["result"], driver["role"], driver["subject_ref"]) == ("Authenticated", "Driver", RAY_ID)
+        assert (driver["result"], driver["role"], driver["display_name"]) == ("Authenticated", "Driver", "Drivers")
         customer = pins.validate("Customer", "8842193", client_key="xpo-browser").answer()
         assert (customer["result"], customer["role"], customer["display_name"]) == ("Authenticated", "Customer", "XPO Logistics")
         assert pins.validate("Customer", "0000000", client_key="xpo-browser").answer() == {"result": "Denied"}
 
     def test_a_pin_opens_only_its_own_portal(self, pins):
-        pins.set_driver_pin(RAY, RAY_ID, "4418")
+        pins.add_driver_pin("4418")
         assert not pins.validate("Operations", "4418", client_key="tablet").authenticated
         assert not pins.validate("Customer", "4418", client_key="tablet").authenticated
 
@@ -106,69 +106,45 @@ class TestCustomersAreKeptApart:
         assert not any(pins.validate("Customer", n, client_key="c").authenticated for n in ("8842193", "8842204"))
 
 
-class TestDriversChooseTheirOwn:
-    def test_a_driver_sets_their_own_pin_of_four_digits(self, pins):
-        assert not pins.driver_has_pin(RAY_ID)
-        pins.set_driver_pin(RAY, RAY_ID, " 0712")
-        assert pins.driver_has_pin(RAY_ID)
-        assert pins.validate("Driver", "0712", client_key="t").display_name == RAY
-        created = next(e for e in pins.events() if e["action"] == "CREATE_PIN")
-        assert (created["actor"], created["channel"]) == (RAY, "DRIVER_PORTAL")
+class TestDriversEnterFourCharacters:
+    """The PIN window opens, four characters, repeat, saved. Nothing else (Mike Zachary, 2026-09-13)."""
 
-    @pytest.mark.parametrize("pin", ["12345", "123", "ab12", "12a4", "１２３４"])
-    def test_a_driver_pin_is_four_digits_only(self, pins, pin):
-        with pytest.raises(CatalogRefusal):
-            pins.set_driver_pin(RAY, RAY_ID, pin)
+    def test_four_characters_are_held_and_open_the_driver_portal(self, pins):
+        assert pins.add_driver_pin("q7 z4")["already_present"] is False
+        answer = pins.validate("Driver", "Q7Z4", client_key="t").answer()
+        assert (answer["result"], answer["role"], answer["display_name"]) == ("Authenticated", "Driver", "Drivers")
+        created = next(e for e in pins.events() if e["action"] == "CREATE_PIN")
+        assert created["channel"] == "DRIVER_PORTAL"
+
+    @pytest.mark.parametrize("pin", ["12345", "123", "", "abcde"])
+    def test_a_driver_pin_is_exactly_four_characters(self, pins, pin):
+        with pytest.raises(CatalogRefusal, match="4 characters|at least 4"):
+            pins.add_driver_pin(pin)
+
+    def test_it_does_not_matter_who_holds_which(self, pins):
+        pins.add_driver_pin("4418")
+        pins.add_driver_pin("AB12")
+        assert pins.add_driver_pin("4418")["already_present"] is True  # the same four characters again
+        assert {pins.validate("Driver", p, client_key="t").identity_id for p in ("4418", "ab12")} == \
+            {pins.identity("Driver", "Drivers")["identity_id"]}
 
     def test_nobody_assigns_a_driver_pin(self, pins):
-        with pytest.raises(CatalogRefusal, match="chooses their own"):
-            pins.create_pin("Driver", RAY, "4418", requested_by=MIKE, subject_ref=RAY_ID)
-        pins.set_driver_pin(RAY, RAY_ID, "4418")
-        with pytest.raises(CatalogRefusal, match="chooses their own"):
-            pins.reset_pin("Driver", RAY, "9926", requested_by=MIKE)
+        with pytest.raises(CatalogRefusal, match="PIN window"):
+            pins.create_pin("Driver", "Ray Vasquez", "4418", requested_by=MIKE)
+        pins.add_driver_pin("4418")
+        with pytest.raises(CatalogRefusal, match="PIN window"):
+            pins.reset_pin("Driver", "Drivers", "9926", requested_by=MIKE)
 
-    def test_the_pin_alone_signs_the_driver_in(self, pins):
-        pins.set_driver_pin(RAY, RAY_ID, "4418")
-        pins.set_driver_pin(DANA, DANA_ID, "5520")
-        assert pins.validate("Driver", "4418", client_key="t").subject_ref == RAY_ID
-        assert pins.validate("Driver", "5520", client_key="t").subject_ref == DANA_ID
-
-    def test_a_pin_another_driver_holds_is_refused(self, pins):
-        # Five drivers, and Mike Zachary wants no more security than this (2026-09-13).
-        pins.set_driver_pin(RAY, RAY_ID, "4418")
-        with pytest.raises(CatalogRefusal, match="taken; choose another"):
-            pins.set_driver_pin(DANA, DANA_ID, "4418")
-        assert not pins.driver_has_pin(DANA_ID)
-
-    def test_a_driver_cannot_change_it_alone_the_office_clears_it(self, pins):
-        pins.set_driver_pin(RAY, RAY_ID, "4418")
-        with pytest.raises(CatalogRefusal, match="already have a PIN"):
-            pins.set_driver_pin(RAY, RAY_ID, "9926")
-        pins.clear_driver_pin(RAY_ID, requested_by=MIKE)
+    def test_the_office_retires_one_or_closes_them_all(self, pins):
+        pins.add_driver_pin("4418")
+        pins.add_driver_pin("5520")
+        pins.disable_pin("Driver", "4418", requested_by=MIKE)
         assert not pins.validate("Driver", "4418", client_key="t").authenticated
-        pins.set_driver_pin(RAY, RAY_ID, "9926")
-        assert pins.validate("Driver", "9926", client_key="t").authenticated
-        pins.clear_driver_pin(RAY_ID, requested_by=MIKE)
-        pins.set_driver_pin(RAY, RAY_ID, "4418")  # choosing an earlier PIN again is fine
-        assert pins.validate("Driver", "4418", client_key="t").authenticated
-
-    def test_disable_and_enable(self, pins):
-        pins.set_driver_pin(RAY, RAY_ID, "4418")
-        pins.set_enabled("Driver", RAY, False, requested_by=MIKE)
-        assert not pins.validate("Driver", "4418", client_key="t").authenticated
-        with pytest.raises(CatalogRefusal, match="disabled"):
-            pins.set_driver_pin(RAY, RAY_ID, "5555")
-        pins.set_enabled("Driver", RAY, True, requested_by=MIKE)
-        assert pins.validate("Driver", "4418", client_key="t").authenticated
-
-    @pytest.mark.parametrize("who", ["Joe", "system", ""])
-    def test_the_driver_is_a_person(self, pins, who):
-        with pytest.raises(CatalogRefusal):
-            pins.set_driver_pin(who, RAY_ID, "4418")
-
-    def test_clearing_an_unknown_driver_is_named(self, pins):
-        with pytest.raises(NotFound):
-            pins.clear_driver_pin("DRV-NONE", requested_by=MIKE)
+        assert pins.validate("Driver", "5520", client_key="t").authenticated
+        pins.set_enabled("Driver", "Drivers", False, requested_by=MIKE)
+        assert not pins.validate("Driver", "5520", client_key="t").authenticated
+        pins.set_enabled("Driver", "Drivers", True, requested_by=MIKE)
+        assert pins.validate("Driver", "5520", client_key="t").authenticated
 
 
 class TestOperationsIsMikesToAuthorize:
@@ -222,7 +198,7 @@ class TestOperationsIsMikesToAuthorize:
 
 class TestLockout:
     def test_five_misses_lock_that_device_even_for_the_right_pin(self, pins):
-        pins.set_driver_pin(RAY, RAY_ID, "4418")
+        pins.add_driver_pin("4418")
         for guess in ("0001", "0002", "0003", "0004", "0005"):
             assert not pins.validate("Driver", guess, client_key="stranger").authenticated
         assert not pins.validate("Driver", "4418", client_key="stranger").authenticated, "locked"
@@ -230,7 +206,7 @@ class TestLockout:
         assert "LOCKED" in [e["action"] for e in pins.events(20)]
 
     def test_the_lock_expires(self, pins, monkeypatch):
-        pins.set_driver_pin(RAY, RAY_ID, "4418")
+        pins.add_driver_pin("4418")
         for _ in range(5):
             pins.validate("Driver", "9999", client_key="d")
         later = datetime.now(timezone.utc) + pins_module.LOCKOUT + timedelta(seconds=1)
@@ -257,7 +233,7 @@ class TestLockout:
 class TestTheRecord:
     def test_no_pin_is_stored_in_the_clear(self, lib, pins, tmp_path):
         pins.add_customer_load("XPO Logistics", "8842193", requested_by=MIKE)
-        pins.set_driver_pin(RAY, RAY_ID, "6197")
+        pins.add_driver_pin("6197")
         ops(pins, pin="730155")
         pins.validate("Customer", "8842193", client_key="c")
         pins.validate("Driver", "6197", client_key="c")
@@ -323,16 +299,13 @@ class TestTheCatalog:
             return json.loads(done.stdout)
 
         lib = open_library(tmp_path / "catalog.db")
-        lib.pins.set_driver_pin(RAY, RAY_ID, "4418")
+        lib.pins.add_driver_pin("4418")
         lib.close()
         cli("pin-load", "XPO Logistics", "8842193", "--by", MIKE)
         assert cli("pin-validate", "driver", "4418")["role"] == "Driver"
         assert cli("pin-validate", "customer", "8842193")["display_name"] == "XPO Logistics"
         assert cli("pin-validate", "customer", "1111111", expect=1) == {"result": "Denied"}
-        cli("pin-disable", "driver", RAY, "--by", MIKE)
-        assert cli("pin-validate", "driver", "4418", expect=1) == {"result": "Denied"}
-        cli("pin-enable", "driver", RAY, "--by", MIKE)
-        cli("pin-driver-clear", RAY_ID, "--by", MIKE)
+        cli("pin-retire", "driver", "4418", "--by", MIKE)
         assert cli("pin-validate", "driver", "4418", expect=1) == {"result": "Denied"}
         assert "authorized by Mike Zachary" in cli("pin-enable", "operations", MIKE, "--by", MIKE, expect=1)["refused"]
-        assert {u["display_name"] for u in cli("pin-users")} == {RAY, "XPO Logistics"}
+        assert {u["display_name"] for u in cli("pin-users")} == {"Drivers", "XPO Logistics"}

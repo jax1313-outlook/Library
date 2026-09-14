@@ -13,16 +13,18 @@ A portal asks one question and gets one of four answers:
 Denied never says why. Wrong PIN, disabled user and locked device look the same to whoever is
 guessing; the reason is in `pin_event`.
 
-**Customers.** A Customer identity is one customer. Each of its load numbers is a PIN, and
+**Customers.** A Customer Load Number is a Mission Visibility Key (Dispatch playbook Section 4A,
+2026-09-13) -- not a username, account, company login or organizational credential. Here a
+Customer identity is one customer. Each of its load numbers is a key, and
 every load number opens that customer's view and nothing else -- XPO's load numbers can never
 show Werner's loads. A load number already held by one customer is refused for another.
 
-**Drivers** choose their own PIN, exactly DRIVER_PIN_LENGTH digits (the last four of the
-driver's Social Security number, by Mike Zachary's practice); nobody assigns one. The PIN alone
-signs a driver in. Level 1 Transport has five drivers, and Mike Zachary ruled that no further
-security is wanted (2026-09-13), so a PIN another driver already holds is simply refused. Like
-every PIN, it is kept only as an HMAC, never in the clear. The office can clear a driver's PIN so the driver chooses
-again; it never sets one.
+**Drivers.** Mike Zachary, 2026-09-13: the PIN window opens, the driver enters four characters
+and repeats them, and they are saved; "No other information or verification is needed." The
+characters are an open-sesame: any held driver PIN opens the Driver portal, and "it does not
+matter who is assigned what." Level 1 Transport has five drivers. All driver PINs belong to one
+identity, DRIVERS; the office can retire one (disable_pin) or close them all (set_enabled).
+Like every PIN, it is kept only as an HMAC, never in the clear.
 
 **Operations** PINs are authorized by Mike Zachary, by voice or in the dialog box with Joe, and
 by no one else and no other way (Mike Zachary, 2026-09-13).
@@ -53,6 +55,8 @@ DRIVER_PIN_LENGTH = 4
 OPERATIONS_AUTHORITY = "Mike Zachary"
 OPERATIONS_CHANNELS = ("VOICE", "DIALOG")
 DRIVER_CHANNEL = "DRIVER_PORTAL"
+DRIVERS = "Drivers"
+DRIVER_ACTOR = "Driver at the PIN window"
 MAX_FAILURES = 5
 WINDOW = timedelta(minutes=15)
 LOCKOUT = timedelta(minutes=15)
@@ -163,9 +167,8 @@ class PinService:
         length = len(normalize_pin(pin))
         if length < MIN_PIN_LENGTH:
             raise CatalogRefusal(f"a PIN is at least {MIN_PIN_LENGTH} characters")
-        if role == "DRIVER" and not (length == DRIVER_PIN_LENGTH
-                                     and all(c in "0123456789" for c in normalize_pin(pin))):
-            raise CatalogRefusal(f"a driver PIN is {DRIVER_PIN_LENGTH} digits")
+        if role == "DRIVER" and length != DRIVER_PIN_LENGTH:
+            raise CatalogRefusal(f"a driver PIN is {DRIVER_PIN_LENGTH} characters")
 
     def _holder(self, role: str, pin_hash: str) -> Optional[dict]:
         row = self.db.execute(
@@ -197,11 +200,11 @@ class PinService:
         """Give an Operations user a PIN (creating the user if new), as authorized by Mike Zachary.
 
         An Operations user holds one PIN; use reset_pin to change it. Drivers choose their own
-        (set_driver_pin); customers enter by load number (add_customer_load).
+        (add_driver_pin); customers enter by load number (add_customer_load).
         """
         role = _role(role)
         if role == "DRIVER":
-            raise CatalogRefusal("a driver chooses their own PIN in the Driver portal; nobody assigns one")
+            raise CatalogRefusal("driver PINs are entered at the Driver portal's PIN window; nobody assigns one")
         if role == "CUSTOMER":
             raise CatalogRefusal("customer entry is by load number; use add_customer_load")
         person = self._authorized(role, requested_by, channel)
@@ -261,7 +264,7 @@ class PinService:
         if role == "CUSTOMER":
             raise CatalogRefusal("customer entry is by load number; add or disable load numbers instead")
         if role == "DRIVER":
-            raise CatalogRefusal("a driver chooses their own PIN; clear it (clear_driver_pin) and the driver chooses again")
+            raise CatalogRefusal("driver PINs are entered at the Driver portal's PIN window; retire one with disable_pin")
         person = self._authorized(role, requested_by, channel)
         self._check_pin(new_pin)
         found = self.identity(role, display_name)
@@ -303,10 +306,8 @@ class PinService:
         return self.identity(role, display_name)
 
     def disable_pin(self, role: str, pin: str, *, requested_by: str, channel: str = "JOE") -> dict:
-        """Stop one PIN -- a single customer load number -- without disabling the user."""
+        """Stop one PIN -- a customer load number, or one driver PIN -- without disabling the user."""
         role = _role(role)
-        if role == "DRIVER":
-            raise CatalogRefusal("a driver's PIN is cleared by driver (clear_driver_pin), not looked up by its value")
         person = self._authorized(role, requested_by, channel)
         holder = self._holder(role, self._hash(role, pin))
         if holder is None:
@@ -318,72 +319,30 @@ class PinService:
                         channel=channel)
         return {"identity_id": holder["identity_id"], "display_name": holder["display_name"]}
 
-    # ── drivers choose their own ─────────────────────────────────────────
+    # ── drivers ──────────────────────────────────────────────────────────
 
-    def _driver(self, driver_ref: str) -> Optional[dict]:
-        row = self.db.execute("SELECT * FROM pin_identity WHERE role = 'DRIVER' AND subject_ref = ?",
-                              ((driver_ref or "").strip(),)).fetchone()
-        return dict(row) if row else None
+    def add_driver_pin(self, pin: str, *, channel: str = DRIVER_CHANNEL) -> dict:
+        """Hold four characters that open the Driver portal. Nothing else is asked or linked.
 
-    def driver_has_pin(self, driver_ref: str) -> bool:
-        found = self._driver(driver_ref)
-        return bool(found and self._active_pins(found["identity_id"]))
-
-    def set_driver_pin(self, driver_name: str, driver_ref: str, pin: str, *,
-                       channel: str = DRIVER_CHANNEL) -> dict:
-        """The driver chooses their own PIN, once. To choose again the office clears it first.
-
-        `driver_ref` is the Dispatch driver_id and `driver_name` the driver's own name, who is
-        the person doing this work.
+        Mike Zachary, 2026-09-13: the PIN window opens, the driver enters four characters and
+        repeats them, and they are saved -- "No other information or verification is needed."
+        Entering four characters that are already held changes nothing.
         """
-        ref = (driver_ref or "").strip()
-        if not ref:
-            raise CatalogRefusal("a driver PIN belongs to a driver on file; no driver was named")
-        person = self._person(driver_name)
         self._check_pin(pin, "DRIVER")
-        found = self._driver(ref)
-        if found and found["status"] != "ENABLED":
-            raise CatalogRefusal("this driver's entry is disabled; call dispatch")
-        if found and self._active_pins(found["identity_id"]):
-            raise CatalogRefusal("you already have a PIN. Call dispatch to clear it, then choose a new one")
         pin_hash = self._hash("DRIVER", pin)
         holder = self._holder("DRIVER", pin_hash)
-        if holder is not None and holder["subject_ref"] != ref:
-            raise CatalogRefusal("that PIN is taken; choose another")
+        if holder is not None:
+            return {"identity_id": holder["identity_id"], "already_present": True}
         with self.catalog.write() as db:
-            now = _iso(_now())
-            if found:
-                identity_id = found["identity_id"]
-            else:
-                if db.execute("SELECT 1 FROM pin_identity WHERE role = 'DRIVER' AND display_name = ?",
-                              (person,)).fetchone():
-                    raise CatalogRefusal(f"another driver named {person} already has portal entry; call dispatch")
-                identity_id = self._ensure_identity(db, "DRIVER", person, ref, person, channel)
-            if holder is not None:  # the same four characters this driver chose before being cleared
-                db.execute("UPDATE pin_credential SET status = 'ENABLED', updated_at = ? WHERE credential_id = ?",
-                           (now, holder["credential_id"]))
-            else:
-                db.execute(
-                    "INSERT INTO pin_credential (credential_id, identity_id, role, pin_hash, created_by, created_at, "
-                    "updated_at) VALUES (?,?,?,?,?,?,?)",
-                    (f"pincred_{uuid.uuid4().hex}", identity_id, "DRIVER", pin_hash, person, now, now),
-                )
-            self._event(db, "CREATE_PIN", role="DRIVER", identity_id=identity_id, actor=person, channel=channel,
-                        detail="chosen by the driver")
-        return {"identity_id": identity_id}
-
-    def clear_driver_pin(self, driver_ref: str, *, requested_by: str, channel: str = "JOE") -> dict:
-        """Stop a driver's PIN so the driver can choose a new one. Nobody else sets it."""
-        person = self._person(requested_by)
-        found = self._driver(driver_ref)
-        if found is None:
-            raise NotFound("that driver has no portal PIN")
-        with self.catalog.write() as db:
-            db.execute("UPDATE pin_credential SET status = 'DISABLED', updated_at = ? WHERE identity_id = ?",
-                       (_iso(_now()), found["identity_id"]))
-            self._event(db, "DISABLE_PIN", role="DRIVER", identity_id=found["identity_id"], actor=person,
-                        channel=channel, detail="cleared; the driver chooses again")
-        return {"identity_id": found["identity_id"], "display_name": found["display_name"]}
+            identity_id = self._ensure_identity(db, "DRIVER", DRIVERS, None, DRIVER_ACTOR, channel)
+            db.execute(
+                "INSERT INTO pin_credential (credential_id, identity_id, role, pin_hash, created_by, created_at, "
+                "updated_at) VALUES (?,?,?,?,?,?,?)",
+                (f"pincred_{uuid.uuid4().hex}", identity_id, "DRIVER", pin_hash, DRIVER_ACTOR, _iso(_now()), _iso(_now())),
+            )
+            self._event(db, "CREATE_PIN", role="DRIVER", identity_id=identity_id, actor=DRIVER_ACTOR,
+                        channel=channel, detail="entered at the PIN window")
+        return {"identity_id": identity_id, "already_present": False}
 
     # ── validation ───────────────────────────────────────────────────────
 

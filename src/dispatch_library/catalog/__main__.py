@@ -100,14 +100,15 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("scan").add_argument("--dry-run", action="store_true")
     # The Library PIN Service. Each administrative command names the person it is done for.
     # Deliberately absent: creating an Operations PIN (Mike Zachary authorizes those by voice or in
-    # the dialog box with Joe) and setting a driver's PIN (drivers choose their own).
+    # the dialog box with Joe) and adding a driver PIN (entered at the Driver portal's PIN window).
     pin_load = sub.add_parser("pin-load", help="a customer load number becomes a Customer portal PIN")
     pin_load.add_argument("customer")
     pin_load.add_argument("load_number")
     pin_load.add_argument("--by", required=True)
-    pin_clear = sub.add_parser("pin-driver-clear", help="clear a driver's PIN so the driver chooses a new one")
-    pin_clear.add_argument("driver_ref")
-    pin_clear.add_argument("--by", required=True)
+    pin_retire = sub.add_parser("pin-retire", help="stop one driver PIN or one customer load number")
+    pin_retire.add_argument("role", choices=("driver", "customer"))
+    pin_retire.add_argument("pin")
+    pin_retire.add_argument("--by", required=True)
     for name in ("pin-enable", "pin-disable"):
         toggle = sub.add_parser(name)
         toggle.add_argument("role", choices=("operations", "driver", "customer"))
@@ -197,8 +198,8 @@ def run(argv) -> tuple:
                        "counts": report.counts(), "findings": report.findings}
         if c == "pin-load":
             return 0, lib.pins.add_customer_load(args.customer, args.load_number, requested_by=args.by)
-        if c == "pin-driver-clear":
-            return 0, lib.pins.clear_driver_pin(args.driver_ref, requested_by=args.by, channel="CLI")
+        if c == "pin-retire":
+            return 0, lib.pins.disable_pin(args.role, args.pin, requested_by=args.by, channel="CLI")
         if c in ("pin-enable", "pin-disable"):
             return 0, lib.pins.set_enabled(args.role, args.name, c == "pin-enable", requested_by=args.by, channel="CLI")
         if c == "pin-validate":
