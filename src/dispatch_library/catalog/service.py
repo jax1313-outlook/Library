@@ -206,6 +206,15 @@ class CatalogLibraryService(LibraryService):
             raise CatalogRefusal("this Library is not bound to a shelf; open it with memory_root")
         return self.catalog.scan(self.memory_root, record=record)
 
+    @property
+    def pins(self):
+        """The Library PIN Service over this catalog: portal entry records Library owns."""
+        from dispatch_library.catalog.pins import PinService
+
+        if not hasattr(self, "_pins"):
+            self._pins = PinService(self.catalog)
+        return self._pins
+
     def close(self) -> None:
         self.connection.close()
 

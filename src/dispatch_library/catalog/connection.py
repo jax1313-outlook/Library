@@ -32,10 +32,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Union
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MINIMUM_SQLITE = (3, 31, 0)
 
 _SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
+_PINS_PATH = Path(__file__).resolve().parent / "pins.sql"
+
+#: (version, script, description), applied in order to bring a catalog up to SCHEMA_VERSION.
+_STEPS = (
+    (2, _SCHEMA_PATH, "Library catalog v2 (LIBRARY_IMPLEMENTATION_PLAN_v2)"),
+    (3, _PINS_PATH, "Library PIN Service (Mike Zachary direction, 2026-09-13)"),
+)
 
 #: SQLite's own default is five seconds, which is short for a laptop that is also writing
 #: evidence files. A writer waits this long for another writer before giving up.
@@ -145,23 +152,28 @@ def migrate(connection: sqlite3.Connection) -> int:
             "recorded, so it is not converted: converting would mean inventing those records. "
             "Move the file aside and open a new catalog."
         )
-    if tables:
+    if tables and version == 0:
         raise CatalogError(
             f"the database holds tables ({', '.join(sorted(tables))}) but no Library schema "
             "version. It is not a Library catalog; refusing to write to it."
         )
 
-    script = _SCHEMA_PATH.read_text(encoding="utf-8")
+    # Each step is additive and runs once. A new file takes every step; a version-2 catalog
+    # takes only the PIN Service tables. All steps run in one transaction, so a failure leaves
+    # the file at the version it had.
+    steps = [(step_version, path, description) for step_version, path, description in _STEPS
+             if step_version > version]
     try:
         connection.execute("BEGIN IMMEDIATE")
-        # executescript() would COMMIT first; running the statements one by one keeps the whole
-        # schema in this transaction, so a failure leaves an empty file rather than half a schema.
-        for statement in _statements(script):
-            connection.execute(statement)
-        connection.execute(
-            "INSERT INTO schema_version (version, applied_at, description) VALUES (?, ?, ?)",
-            (SCHEMA_VERSION, _now(), "Library catalog v2 (LIBRARY_IMPLEMENTATION_PLAN_v2)"),
-        )
+        # executescript() would COMMIT first; running the statements one by one keeps every step
+        # in this transaction.
+        for step_version, path, description in steps:
+            for statement in _statements(path.read_text(encoding="utf-8")):
+                connection.execute(statement)
+            connection.execute(
+                "INSERT INTO schema_version (version, applied_at, description) VALUES (?, ?, ?)",
+                (step_version, _now(), description),
+            )
         connection.execute("COMMIT")
     except Exception:
         if connection.in_transaction:

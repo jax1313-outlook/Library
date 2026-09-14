@@ -28,8 +28,10 @@ from dispatch_library.catalog.service import (
     open_library,
 )
 from dispatch_library.catalog.store import Catalog, CatalogRefusal, MissingObjectType, NotFound, ScanReport
+from dispatch_library.catalog.pins import PinResult, PinService, open_pin_service
 
 __all__ = [
+    "PinResult", "PinService", "open_pin_service",
     "SCHEMA_VERSION", "CATALOG_ENV", "Catalog", "CatalogBusyError", "CatalogError", "CatalogLibraryService",
     "CatalogRefusal", "CatalogVersionError", "MissingObjectType", "NotFound", "ScanReport",
     "SqliteCandidateQueue", "SqliteObjectRegistry", "connect", "current_version", "library", "migrate",

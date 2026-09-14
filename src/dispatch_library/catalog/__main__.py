@@ -98,6 +98,32 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("recipe").add_argument("type")
     sub.add_parser("resolve-packet").add_argument("type")
     sub.add_parser("scan").add_argument("--dry-run", action="store_true")
+    # The Library PIN Service. Each administrative command names the person it is done for.
+    pin_create = sub.add_parser("pin-create", help="give an Operations user or Driver a PIN")
+    pin_create.add_argument("role", choices=("operations", "driver"))
+    pin_create.add_argument("name")
+    pin_create.add_argument("pin")
+    pin_create.add_argument("--by", required=True)
+    pin_create.add_argument("--subject")
+    pin_load = sub.add_parser("pin-load", help="a customer load number becomes a Customer portal PIN")
+    pin_load.add_argument("customer")
+    pin_load.add_argument("load_number")
+    pin_load.add_argument("--by", required=True)
+    pin_reset = sub.add_parser("pin-reset")
+    pin_reset.add_argument("role", choices=("operations", "driver"))
+    pin_reset.add_argument("name")
+    pin_reset.add_argument("pin")
+    pin_reset.add_argument("--by", required=True)
+    for name in ("pin-enable", "pin-disable"):
+        toggle = sub.add_parser(name)
+        toggle.add_argument("role", choices=("operations", "driver", "customer"))
+        toggle.add_argument("name")
+        toggle.add_argument("--by", required=True)
+    pin_validate = sub.add_parser("pin-validate")
+    pin_validate.add_argument("role", choices=("operations", "driver", "customer"))
+    pin_validate.add_argument("pin")
+    pin_validate.add_argument("--client", default="command-line")
+    sub.add_parser("pin-users").add_argument("--role", choices=("operations", "driver", "customer"))
     return p
 
 
@@ -175,6 +201,19 @@ def run(argv) -> tuple:
             return 0, {"scan_id": report.scan_id, "memory_root": report.memory_root, "files_seen": report.files_seen,
                        "folders_seen": report.folders_seen, "catalogued": report.catalogued,
                        "counts": report.counts(), "findings": report.findings}
+        if c == "pin-create":
+            return 0, lib.pins.create_pin(args.role, args.name, args.pin, requested_by=args.by, subject_ref=args.subject)
+        if c == "pin-load":
+            return 0, lib.pins.add_customer_load(args.customer, args.load_number, requested_by=args.by)
+        if c == "pin-reset":
+            return 0, lib.pins.reset_pin(args.role, args.name, args.pin, requested_by=args.by)
+        if c in ("pin-enable", "pin-disable"):
+            return 0, lib.pins.set_enabled(args.role, args.name, c == "pin-enable", requested_by=args.by)
+        if c == "pin-validate":
+            answer = lib.pins.validate(args.role, args.pin, client_key=args.client).answer()
+            return (0 if answer["result"] == "Authenticated" else 1), answer
+        if c == "pin-users":
+            return 0, lib.pins.identities(args.role)
         return 2, {"error": f"unknown command {c}"}
     except (CatalogRefusal, NotFound) as exc:
         return 1, {"refused": str(exc), "kind": type(exc).__name__}

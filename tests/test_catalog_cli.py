@@ -24,7 +24,7 @@ def test_library_remembers_across_separate_processes(tmp_path):
     (tmp_path / "Memory" / "Templates" / "closeout.md").write_text("Closeout {load_id}", encoding="utf-8")
 
     status = cli(tmp_path, "init")
-    assert (status["schema_version"], status["journal_mode"]) == (2, "wal")
+    assert (status["schema_version"], status["journal_mode"]) == (3, "wal")
 
     refused = cli(tmp_path, "place", "--code", "TPL-1", "--collection", "Templates", "--title", "t",
                   "--accepted-by", "Certification Operator", "--body", "b", expect=1)

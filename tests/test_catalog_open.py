@@ -20,10 +20,10 @@ def test_this_sqlite_is_supported():
     assert sqlite_version() >= MINIMUM_SQLITE
 
 
-def test_a_new_file_gets_schema_version_two_in_wal_mode(tmp_path):
+def test_a_new_file_gets_the_current_schema_version_in_wal_mode(tmp_path):
     path = tmp_path / "catalog.db"
     connection = open_catalog(path)
-    assert current_version(connection) == SCHEMA_VERSION == 2
+    assert current_version(connection) == SCHEMA_VERSION == 3
     assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert connection.execute("SELECT count(*) FROM library_collection").fetchone()[0] == 15
@@ -35,7 +35,7 @@ def test_reopening_is_idempotent(tmp_path):
     path = tmp_path / "catalog.db"
     open_catalog(path).close()
     connection = open_catalog(path)
-    assert connection.execute("SELECT count(*) FROM schema_version").fetchone()[0] == 1
+    assert connection.execute("SELECT count(*) FROM schema_version").fetchone()[0] == 2  # versions 2 and 3
     assert connection.execute("SELECT count(*) FROM library_collection").fetchone()[0] == 15
     connection.close()
 
@@ -85,10 +85,10 @@ def test_a_newer_schema_is_refused(tmp_path):
     path = tmp_path / "new.db"
     db = sqlite3.connect(path)
     db.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT, description TEXT)")
-    db.execute("INSERT INTO schema_version VALUES (3, 'later', 'future')")
+    db.execute("INSERT INTO schema_version VALUES (4, 'later', 'future')")
     db.commit()
     db.close()
-    with pytest.raises(CatalogVersionError, match="version 3"):
+    with pytest.raises(CatalogVersionError, match="version 4"):
         open_catalog(path)
 
 
