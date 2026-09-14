@@ -15,9 +15,10 @@ guessing; the reason is in `pin_event`.
 
 **Customers.** A Customer Load Number is a Mission Visibility Key (Dispatch playbook Section 4A,
 2026-09-13) -- not a username, account, company login or organizational credential. Here a
-Customer identity is one customer. Each of its load numbers is a key, and
-every load number opens that customer's view and nothing else -- XPO's load numbers can never
-show Werner's loads. A load number already held by one customer is refused for another.
+Customer identity is one customer, and each of its load numbers is a key. The key is
+mission-scoped: Dispatch opens only the mission whose Mission Record carries that load number.
+The Library's part is saying the key is good and whose it is; a load number already held by
+one customer is refused for another.
 
 **Drivers.** Mike Zachary, 2026-09-13: the PIN window opens, the driver enters four characters
 and repeats them, and they are saved; "No other information or verification is needed." The
