@@ -117,7 +117,6 @@ def _parser() -> argparse.ArgumentParser:
     pin_validate.add_argument("role", choices=("operations", "driver", "customer"))
     pin_validate.add_argument("pin")
     pin_validate.add_argument("--client", default="command-line")
-    pin_validate.add_argument("--driver", help="the driver_id, for the Driver portal")
     sub.add_parser("pin-users").add_argument("--role", choices=("operations", "driver", "customer"))
     return p
 
@@ -203,7 +202,7 @@ def run(argv) -> tuple:
         if c in ("pin-enable", "pin-disable"):
             return 0, lib.pins.set_enabled(args.role, args.name, c == "pin-enable", requested_by=args.by, channel="CLI")
         if c == "pin-validate":
-            answer = lib.pins.validate(args.role, args.pin, client_key=args.client, account=args.driver).answer()
+            answer = lib.pins.validate(args.role, args.pin, client_key=args.client).answer()
             return (0 if answer["result"] == "Authenticated" else 1), answer
         if c == "pin-users":
             return 0, lib.pins.identities(args.role)

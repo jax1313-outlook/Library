@@ -17,10 +17,12 @@ guessing; the reason is in `pin_event`.
 every load number opens that customer's view and nothing else -- XPO's load numbers can never
 show Werner's loads. A load number already held by one customer is refused for another.
 
-**Drivers** choose their own PIN, no more than DRIVER_PIN_LENGTH characters; nobody assigns
-one. A driver's PIN is tied to that driver (the Dispatch driver_id, found from the phone number
-the driver gives), so two drivers may choose the same four characters and neither learns it.
-The office can clear a driver's PIN so the driver chooses again; it never sets one.
+**Drivers** choose their own PIN, exactly DRIVER_PIN_LENGTH digits (the last four of the
+driver's Social Security number, by Mike Zachary's practice); nobody assigns one. The PIN alone
+signs a driver in. Level 1 Transport has five drivers, and Mike Zachary ruled that no further
+security is wanted (2026-09-13), so a PIN another driver already holds is simply refused. Like
+every PIN, it is kept only as an HMAC, never in the clear. The office can clear a driver's PIN so the driver chooses
+again; it never sets one.
 
 **Operations** PINs are authorized by Mike Zachary, by voice or in the dialog box with Joe, and
 by no one else and no other way (Mike Zachary, 2026-09-13).
@@ -112,10 +114,8 @@ class PinService:
                        (secrets.token_bytes(32), _iso(_now())))
         return bytes(self.db.execute("SELECT secret FROM pin_service_key WHERE id = 1").fetchone()["secret"])
 
-    def _hash(self, role: str, pin: str, account: str = "") -> str:
-        # A driver's PIN is hashed with the driver it belongs to; Operations and Customer PINs stand alone.
-        subject = f"{role}:{account}:" if role == "DRIVER" else f"{role}:"
-        return hmac.new(self._secret(), f"{subject}{normalize_pin(pin)}".encode("utf-8"), hashlib.sha256).hexdigest()
+    def _hash(self, role: str, pin: str) -> str:
+        return hmac.new(self._secret(), f"{role}:{normalize_pin(pin)}".encode("utf-8"), hashlib.sha256).hexdigest()
 
     # ── records ──────────────────────────────────────────────────────────
 
@@ -163,8 +163,9 @@ class PinService:
         length = len(normalize_pin(pin))
         if length < MIN_PIN_LENGTH:
             raise CatalogRefusal(f"a PIN is at least {MIN_PIN_LENGTH} characters")
-        if role == "DRIVER" and length > DRIVER_PIN_LENGTH:
-            raise CatalogRefusal(f"a driver PIN is no more than {DRIVER_PIN_LENGTH} characters")
+        if role == "DRIVER" and not (length == DRIVER_PIN_LENGTH
+                                     and all(c in "0123456789" for c in normalize_pin(pin))):
+            raise CatalogRefusal(f"a driver PIN is {DRIVER_PIN_LENGTH} digits")
 
     def _holder(self, role: str, pin_hash: str) -> Optional[dict]:
         row = self.db.execute(
@@ -345,8 +346,10 @@ class PinService:
             raise CatalogRefusal("this driver's entry is disabled; call dispatch")
         if found and self._active_pins(found["identity_id"]):
             raise CatalogRefusal("you already have a PIN. Call dispatch to clear it, then choose a new one")
-        pin_hash = self._hash("DRIVER", pin, ref)
+        pin_hash = self._hash("DRIVER", pin)
         holder = self._holder("DRIVER", pin_hash)
+        if holder is not None and holder["subject_ref"] != ref:
+            raise CatalogRefusal("that PIN is taken; choose another")
         with self.catalog.write() as db:
             now = _iso(_now())
             if found:
@@ -384,23 +387,17 @@ class PinService:
 
     # ── validation ───────────────────────────────────────────────────────
 
-    def validate(self, portal_role: str, pin: str, *, client_key: Optional[str] = None,
-                 account: Optional[str] = None) -> PinResult:
-        """Authenticated with a role and who, or Denied. Never says why it denied.
-
-        The Driver portal also names the driver (`account`, the Dispatch driver_id).
-        """
+    def validate(self, portal_role: str, pin: str, *, client_key: Optional[str] = None) -> PinResult:
+        """Authenticated with a role and who, or Denied. Never says why it denied."""
         try:
             role = _role(portal_role)
         except CatalogRefusal:
             return DENIED
         client = (client_key or "").strip() or UNKNOWN_CLIENT
         now = _now()
-        account = (account or "").strip()
         # Hashed before the transaction: the first hash on a new catalog creates the key, which is a
         # write of its own and cannot nest inside the one below.
-        usable = normalize_pin(pin) and (account or role != "DRIVER")
-        pin_hash = self._hash(role, pin, account) if usable else None
+        pin_hash = self._hash(role, pin) if normalize_pin(pin) else None
         with self.catalog.write() as db:
             lock = db.execute("SELECT * FROM pin_lockout WHERE client_key = ? AND portal_role = ?",
                               (client, role)).fetchone()
@@ -409,8 +406,6 @@ class PinService:
                 return DENIED
 
             holder = self._holder(role, pin_hash) if pin_hash else None
-            if holder and role == "DRIVER" and holder["subject_ref"] != account:
-                holder = None
             if holder and holder["pin_status"] == "ENABLED" and holder["status"] == "ENABLED":
                 db.execute("DELETE FROM pin_lockout WHERE client_key = ? AND portal_role = ?", (client, role))
                 self._event(db, "AUTHENTICATED", role=role, identity_id=holder["identity_id"], client_key=client)
